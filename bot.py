@@ -38,7 +38,7 @@ STORE_LINKS = {
     },
 }
 
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
 
@@ -811,7 +811,12 @@ def webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
+        try:
+            bot.process_new_updates([update])
+        except Exception:
+            import traceback
+            print("‼️ ERROR while processing update:")
+            traceback.print_exc()
         return '', 200
     else:
         abort(403)
