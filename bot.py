@@ -841,6 +841,18 @@ def index():
     return 'VedaVPN bot is running ✅', 200
 
 
+@app.route('/sub', methods=['GET'])
+def get_sub():
+    # Կարդալ sub ֆայլը և վերադարձնել որպես տեքստ
+    file_path = os.path.join(os.path.dirname(__file__), 'sub')
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except FileNotFoundError:
+        return "File not found", 404
+
+
 def setup_webhook():
     bot.remove_webhook()
     time.sleep(1)
