@@ -1,0 +1,17 @@
+#profile-title: 🌐 VedaVPN | Быстрый VPN
+#subscription-userinfo: upload=0; download=0; total=0
+#profile-update-interval: 12
+#support-url: https://t.me/vedavpn_bot
+#profile-web-page-url: https://vedavpn.lol
+#announce: ⚡️ Привет! Мы добавили новые серверы и удалили старые. Чтобы они заработали, нажмите «Обновить» в вашем VPN-клиенте. Все свежие ссылки всегда ждут вас в боте @vedavpn_bot и на сайте vedavpn.lol. Подключайтесь! 💚
+
+vless://ef8c7169-87fc-49ad-be91-1f3984ab446d@mog.keyblack.site:8444?flow=xtls-rprx-vision&type=tcp&security=reality&fp=firefox&sni=www.cloudflare.com&pbk=DQGwrxOgoiyBDrbdFUofP88FGtxHDA2duzNXKkyxaig&sid=6ba85179e30d4fc2#VedaVPN%20%F0%9F%87%B3%F0%9F%87%B1%20%D0%9D%D0%B8%D0%B4%D0%B5%D1%80%D0%BB%D0%B0%D0%B4%D1%8B
+hysteria2://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@unic.hysteria.ltd:5443?sni=unic.hysteria.ltd&alpn=h3#VedaVPN%20%F0%9F%87%A9%F0%9F%87%AA%20%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F%20(Frankfurt)
+hysteria2://48139d20-931e-4e2b-83f5-8ea97d226c18@aestheticperforator.ru:8443?sni=aestheticperforator.ru&alpn=h3#VedaVPN%20%F0%9F%87%B8%F0%9F%87%AA%20%D0%A8%D0%B2%D0%B5%D1%86%D0%B8%D1%8F
+vless://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@fr.cloudgamings.org:8443?type=ws&security=tls&fp=qq&sni=fr.cloudgamings.org&path=%2Fws&host=fr.cloudgamings.org&alpn=h2,http/1.1#VedaVPN%20%F0%9F%87%AB%F0%9F%87%B7%20%D0%A4%D1%80%D0%B0%D0%BD%D1%86%D0%B8%D1%8F
+vless://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@omg.herumhas.shop:5443?flow=xtls-rprx-vision&type=tcp&security=reality&fp=chrome&sni=max.ru&pbk=LGcG8Sqv5vPDypbaEgHV0ZGqQOBkgDepPWXyDohbVXQ#VedaVPN%20%F0%9F%87%B7%F0%9F%87%BA%20%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F%20%D0%9E%D0%B1%D1%85%D0%BE%D0%B4%20%231
+vless://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@217.herumhas.shop:5443?flow=xtls-rprx-vision&type=tcp&security=reality&fp=chrome&sni=max.ru&pbk=LGcG8Sqv5vPDypbaEgHV0ZGqQOBkgDepPWXyDohbVXQ#VedaVPN%20%F0%9F%87%B7%F0%9F%87%BA%20%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F%20%D0%9E%D0%B1%D1%85%D0%BE%D0%B4%20%232
+hysteria2://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@hyst-1.hysteria.ltd:5443?sni=hyst-1.hysteria.ltd&alpn=h3#VedaVPN%20%F0%9F%87%B7%F0%9F%87%BA%20%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F%20%D0%9E%D0%B1%D1%85%D0%BE%D0%B4%20%233
+hysteria2://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@vkmks.hysteria.ltd:5443?sni=vkmks.hysteria.ltd&alpn=h3#VedaVPN%20%F0%9F%87%B7%F0%9F%87%BA%20%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F%20%D0%9E%D0%B1%D1%85%D0%BE%D0%B4%20%234
+vless://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@46.8.208.49:9443?type=ws&security=tls&fp=qq&sni=slc-1.hysteria.ltd&path=%2Fws#VedaVPN%20%F0%9F%87%A9%F0%9F%87%AA%20%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F%20%D0%9E%D0%B1%D1%85%D0%BE%D0%B4%20%231
+hysteria2://0e3ec08f-840e-46f8-b11e-3a5decbb97b6@united.hysteria.ltd:5443?sni=united.hysteria.ltd&alpn=h3#VedaVPN%20%F0%9F%87%BA%F0%9F%87%B8%20%D0%A1%D0%A8%D0%90
