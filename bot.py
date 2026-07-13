@@ -3,6 +3,7 @@ import time
 from io import BytesIO
 
 import psycopg2
+import psycopg2.pool
 import qrcode
 import telebot
 from telebot import types
@@ -42,9 +43,17 @@ bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
 
 
-# === DATABASE (PostgreSQL/Supabase, safe open/close, always closed) ===
+# === DATABASE (PostgreSQL/Supabase via a reusable connection pool) ===
+# Opening a brand-new TCP/TLS connection for every single query (as before)
+# is what was making replies feel slow -- one button tap could trigger a
+# dozen+ separate connections. A pool keeps a handful of connections open
+# and reuses them, so a query is just a quick round trip instead of a full
+# handshake every time.
+db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, SUPABASE_URL)
+
+
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
-    conn = psycopg2.connect(SUPABASE_URL)
+    conn = db_pool.getconn()
     try:
         cur = conn.cursor()
         cur.execute(query, params)
@@ -55,8 +64,11 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
         if fetchall:
             return cur.fetchall()
         return None
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        db_pool.putconn(conn)
 
 
 def init_db():
