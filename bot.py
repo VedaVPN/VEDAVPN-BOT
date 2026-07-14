@@ -18,7 +18,7 @@ VPN_LINK_DEFAULT = "https://pastebin.com/raw/քո_նոր_հղումը_այստե
 
 # GitHub-ում պահվող sub ֆայլի կարգավորումներ (VPN բաժանորդագրության հղումի աղբյուր)
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-GITHUB_REPO = os.environ.get('GITHUB_REPO', 'VedaVPN/Veda-VPN-SITE')
+GITHUB_REPO = os.environ.get('GITHUB_REPO', 'VedaVPN/VEDAVPN-BOT')
 GITHUB_SUB_PATH = os.environ.get('GITHUB_SUB_PATH', 'sub')
 
 
