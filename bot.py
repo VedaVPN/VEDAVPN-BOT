@@ -8,12 +8,25 @@ import qrcode
 import telebot
 from telebot import types
 from flask import Flask, request, abort
+from github import Github
 
 TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID'))
 CHANNEL = '@vedavpn'
 FORUM_LINK_DEFAULT = 'https://t.me/vedavpnforum'
 VPN_LINK_DEFAULT = "https://pastebin.com/raw/քո_նոր_հղումը_այստեղ"
+
+# GitHub-ում պահվող sub ֆայլի կարգավորումներ (VPN բաժանորդագրության հղումի աղբյուր)
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+GITHUB_REPO = os.environ.get('GITHUB_REPO', 'VedaVPN/Veda-VPN-SITE')
+GITHUB_SUB_PATH = os.environ.get('GITHUB_SUB_PATH', 'sub')
+
+
+def get_sub_file_contents():
+    """Օգնական ֆունկցիա՝ sub ֆայլի ընթացիկ contents օբյեկտը GitHub-ից բերելու համար։"""
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(GITHUB_REPO)
+    return repo, repo.get_contents(GITHUB_SUB_PATH)
 
 # Supabase PostgreSQL connection string (Project Settings → Database → Connection string → URI)
 SUPABASE_URL = os.environ.get(
@@ -541,7 +554,14 @@ def admin_panel(message):
         f"<b>Նոր կոճակներ.</b>\n"
         f"/addbutton hy|ru|hy_պատասխան|ru_ответ — ավելացնել նոր կոճակ\n"
         f"/listbuttons — ցույց տալ ավելացված կոճակները\n"
-        f"/removebutton ID — հեռացնել կոճակ"
+        f"/removebutton ID — հեռացնել կոճակ\n\n"
+        f"<b>Sub ֆայլի կառավարում (GitHub).</b>\n"
+        f"/update_sub [տեքստ] — թարմացնել ամբողջ sub ֆայլը\n"
+        f"/append_sub [հղում] — ավելացնել նոր սերվեր (առանց ջնջելու)\n"
+        f"/delete_sub_keyword [հիմնաբառ] — ջնջել սերվերը\n"
+        f"/list_and_delete — ցույց տալ սերվերները կոճակներով\n"
+        f"/show_sub — ցույց տալ ֆայլի բովանդակությունը\n"
+        f"/clear_sub — ջնջել բոլոր սերվերները"
     )
 
 
@@ -779,6 +799,187 @@ def remove_button_cmd(message):
         return
     db_execute("DELETE FROM custom_buttons WHERE id = %s", (button_id,), commit=True)
     bot.send_message(ADMIN_ID, f"✅ Կոճակ {button_id} հեռացվեց։")
+
+
+# === ADMIN. SUB ֆայլի կառավարում GitHub-ի միջոցով ===
+@bot.message_handler(commands=['update_sub'])
+def update_sub_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    try:
+        new_content = message.text.split(maxsplit=1)[1]
+    except IndexError:
+        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /update_sub [ամբողջ նոր տեքստը]")
+        return
+
+    try:
+        repo, contents = get_sub_file_contents()
+        repo.update_file(
+            path=contents.path,
+            message="Update sub file via bot",
+            content=new_content,
+            sha=contents.sha,
+        )
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ sub ֆայլը թարմացվեց!\n\nԹարմացված տեքստը (առաջին 200 նիշ).\n{new_content[:200]}..."
+        )
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+
+
+@bot.message_handler(commands=['append_sub'])
+def append_sub_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    try:
+        new_line = message.text.split(maxsplit=1)[1]
+    except IndexError:
+        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /append_sub [նոր սերվերի հղումը]")
+        return
+
+    try:
+        repo, contents = get_sub_file_contents()
+        current_content = contents.decoded_content.decode('utf-8')
+        if not current_content.endswith('\n'):
+            current_content += '\n'
+        new_content = current_content + new_line + '\n'
+        repo.update_file(
+            path=contents.path,
+            message="Appended new server via bot",
+            content=new_content,
+            sha=contents.sha,
+        )
+        bot.send_message(ADMIN_ID, f"✅ Նոր սերվերն ավելացվեց ֆայլի վերջում:\n\n{new_line[:80]}...")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+
+
+@bot.message_handler(commands=['delete_sub_keyword'])
+def delete_sub_keyword_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    try:
+        keyword = message.text.split(maxsplit=1)[1]
+    except IndexError:
+        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /delete_sub_keyword [հիմնաբառ]")
+        return
+
+    try:
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+        new_lines = [line for line in lines if keyword not in line]
+        if len(new_lines) == len(lines):
+            bot.send_message(ADMIN_ID, f"⚠️ '{keyword}' հիմնաբառով սերվեր չի գտնվել:")
+            return
+        new_content = '\n'.join(new_lines)
+        repo.update_file(contents.path, f"Deleted containing: {keyword}", new_content, contents.sha)
+        bot.send_message(ADMIN_ID, f"✅ Ջնջվեց '{keyword}' պարունակող տողը:")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+
+
+@bot.message_handler(commands=['list_and_delete'])
+def list_and_delete(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    try:
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+        if not lines:
+            bot.send_message(ADMIN_ID, "ℹ️ Ֆայլը դատարկ է:")
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        buttons = []
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            preview = (line[:30] + '...') if len(line) > 30 else line
+            buttons.append(types.InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_line_{i}"))
+        if not buttons:
+            bot.send_message(ADMIN_ID, "ℹ️ Ջնջելու սերվեր չկա:")
+            return
+        markup.add(*buttons)
+        bot.send_message(ADMIN_ID, "👇 Սեղմիր սերվերի վրա, որը ցանկանում ես ջնջել:", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('del_line_'))
+def process_delete_line(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Միայն ադմինը կարող է:")
+        return
+    try:
+        line_index = int(call.data.split('_')[2])
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+        del lines[line_index]
+        new_content = '\n'.join(lines)
+        repo.update_file(contents.path, f"Deleted line {line_index + 1}", new_content, contents.sha)
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"✅ {line_index + 1}-րդ տողը ջնջվեց!",
+            reply_markup=None,
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Սխալ: {str(e)}")
+
+
+@bot.message_handler(commands=['show_sub'])
+def show_sub(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    try:
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+        formatted = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+        # Telegram-ի հաղորդագրության սահմանաչափի պատճառով բաժանում ենք մասերի, եթե երկար է
+        chunks = [formatted[i:i + 3500] for i in range(0, len(formatted), 3500)] or ["(դատարկ)"]
+        for chunk in chunks:
+            bot.send_message(ADMIN_ID, f"📄 Ֆայլի բովանդակությունը՝\n\n{chunk}")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+
+
+@bot.message_handler(commands=['clear_sub'])
+def clear_sub_cmd(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ Այո, ջնջել բոլորը", callback_data="confirm_clear_sub"),
+        types.InlineKeyboardButton("❌ Չեղարկել", callback_data="cancel_clear_sub"),
+    )
+    bot.send_message(ADMIN_ID, "⚠️ Դուք պատրաստվում եք ջնջել ԲՈԼՈՐ սերվերները։\nՀամոզվա՞ծ եք։", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("confirm_clear_sub", "cancel_clear_sub"))
+def process_clear_sub(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Միայն ադմինը կարող է:")
+        return
+    if call.data == "cancel_clear_sub":
+        bot.edit_message_text("❌ Չեղարկվեց։", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        bot.answer_callback_query(call.id)
+        return
+    try:
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+        new_lines = [line for line in lines if line.startswith('#')]
+        new_content = '\n'.join(new_lines)
+        repo.update_file(contents.path, "Cleared all servers", new_content, contents.sha)
+        bot.edit_message_text(
+            "✅ Բոլոր սերվերները ջնջվեցին։\nՄնացին միայն վերնագրերը։\n"
+            "Նոր սերվերներ ավելացնելու համար օգտագործիր /update_sub կամ /append_sub",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Սխալ: {str(e)}")
 
 
 @bot.message_handler(func=lambda m: db_execute(
