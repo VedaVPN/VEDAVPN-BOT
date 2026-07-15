@@ -879,6 +879,44 @@ def delete_sub_keyword_cmd(message):
         bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
 
 
+def extract_server_name(line):
+    """
+    Extract meaningful name from configuration line.
+    Supports: VLESS, VMESS, SS, SSR, Trojan, etc.
+    Returns: (name, protocol_type)
+    """
+    if not line.strip() or line.startswith('#'):
+        return None, None
+    
+    # Extract name after # for VLESS/VMESS
+    if '#' in line and line.startswith(('vless://', 'vmess://', 'ss://', 'trojan://', 'ssr://')):
+        try:
+            parts = line.split('#')
+            if len(parts) > 1:
+                name = parts[-1].strip()
+                if name:
+                    # Get protocol type
+                    protocol = line.split('://')[0].upper()
+                    return name, protocol
+        except:
+            pass
+    
+    # Fallback: use first meaningful part
+    if '://' in line:
+        try:
+            protocol = line.split('://')[0].upper()
+            # Try to extract a name or use shortened URL
+            if '#' in line:
+                name = line.split('#')[-1].strip()
+            else:
+                name = f"Server"
+            return name, protocol
+        except:
+            pass
+    
+    return None, None
+
+
 @bot.message_handler(commands=['list_and_delete'])
 def list_and_delete(message):
     if message.chat.id != ADMIN_ID:
@@ -889,18 +927,40 @@ def list_and_delete(message):
         if not lines:
             bot.send_message(ADMIN_ID, "ℹ️ Ֆայլը դատարկ է:")
             return
+        
         markup = types.InlineKeyboardMarkup(row_width=1)
         buttons = []
+        config_count = 0
+        
         for i, line in enumerate(lines):
             if not line.strip():
                 continue
-            preview = (line[:30] + '...') if len(line) > 30 else line
-            buttons.append(types.InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_line_{i}"))
+            
+            # Skip metadata lines
+            if line.startswith('#'):
+                continue
+            
+            # Extract meaningful name
+            name, protocol = extract_server_name(line)
+            if not name:
+                name = "Unknown"
+            
+            config_count += 1
+            # Display: Protocol [#] Name
+            display_text = f"❌ [{config_count}] {protocol or 'CONFIG'}: {name[:40]}"
+            buttons.append(types.InlineKeyboardButton(display_text, callback_data=f"del_line_{i}"))
+        
         if not buttons:
             bot.send_message(ADMIN_ID, "ℹ️ Ջնջելու սերվեր չկա:")
             return
+        
         markup.add(*buttons)
-        bot.send_message(ADMIN_ID, "👇 Սեղմիր սերվերի վրա, որը ցանկանում ես ջնջել:", reply_markup=markup)
+        bot.send_message(
+            ADMIN_ID, 
+            f"👇 Ընտրել սերվերը ջնջելու համար:\n\n💡 <i>Ընդամենը {config_count} հատ configuration</i>", 
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
 
@@ -935,11 +995,31 @@ def show_sub(message):
     try:
         repo, contents = get_sub_file_contents()
         lines = contents.decoded_content.decode('utf-8').split('\n')
-        formatted = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+        
+        # Separate metadata and actual servers
+        metadata = []
+        servers = []
+        
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            if line.startswith('#'):
+                metadata.append(f"{i + 1}. {line}")
+            else:
+                name, protocol = extract_server_name(line)
+                display_name = name if name else line[:50]
+                servers.append(f"{i + 1}. [{protocol or 'UNKNOWN'}] {display_name}")
+        
+        # Format output
+        formatted = "📋 <b>METADATA / ԿԱՐԳԱՎՈՐՈՒՄՆԵՐ:</b>\n"
+        formatted += "\n".join(metadata) if metadata else "  (없음)"
+        formatted += "\n\n🖥️ <b>SERVERS / ՍԵՐՎԵՐՆԵՐ ({} հատ):</b>\n".format(len(servers))
+        formatted += "\n".join(servers) if servers else "  (Կա չ)"
+        
         # Telegram-ի հաղորդագրության սահմանաչափի պատճառով բաժանում ենք մասերի, եթե երկար է
         chunks = [formatted[i:i + 3500] for i in range(0, len(formatted), 3500)] or ["(դատարկ)"]
         for chunk in chunks:
-            bot.send_message(ADMIN_ID, f"📄 Ֆայլի բովանդակությունը՝\n\n{chunk}")
+            bot.send_message(ADMIN_ID, chunk, parse_mode="HTML")
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
 
