@@ -1,8 +1,6 @@
 import os
-import re
 import time
 from io import BytesIO
-from urllib.parse import unquote
 
 import psycopg2
 import psycopg2.pool
@@ -554,7 +552,7 @@ def admin_panel(message):
         f"/setiptv նոր_հղում — փոխել IPTV հղումը\n"
         f"/setphoto — սահմանել ողջյունի նկարը (ուղարկիր նկար caption-ում /setphoto, կամ reply արա նկարին)\n\n"
         f"<b>Նոր կոճակներ.</b>\n"
-        f"/addbutton hy|ru|hy_պատասխան|ru_ответ — ավելացնել նոր կոճակ\n"
+        f"/addbutton անուն_hy|անուն_ru|պատասխան_hy|պատասխան_ru — ավելացնել նոր կոճակ (առանց prefix, պարզապես 4 մաս | -ով)\n"
         f"/listbuttons — ցույց տալ ավելացված կոճակները\n"
         f"/removebutton ID — հեռացնել կոճակ\n\n"
         f"<b>Sub ֆայլի կառավարում (GitHub).</b>\n"
@@ -761,8 +759,8 @@ def add_button_cmd(message):
     except Exception:
         bot.send_message(
             ADMIN_ID,
-            "❌ Ֆորմատ.\n"
-            "<code>/addbutton hy_կոճակ|ru_кнопка|hy_պատասխան|ru_ответ</code>\n\n"
+            "❌ Ֆորմատ (առանց hy_/ru_ prefix-ների, պարզապես 4 մաս | -ով).\n"
+            "<code>/addbutton [կոճակի անունը հայերեն]|[կոճակի անունը ռուսերեն]|[պատասխանը հայերեն]|[պատասխանը ռուսերեն]</code>\n\n"
             "Օրինակ.\n"
             "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրային WiFi-ում առանց...|Никогда не используйте VPN в публичном WiFi без...</code>"
         )
@@ -881,26 +879,6 @@ def delete_sub_keyword_cmd(message):
         bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
 
 
-# Protocol prefixները, որոնցով սկսվող տողերը իրական սերվեր-config են (ոչ թե header/comment)
-SERVER_LINE_PREFIXES = ('vless://', 'vmess://', 'trojan://', 'ss://', 'hysteria://', 'hysteria2://', 'hy2://', 'tuic://')
-
-
-def extract_server_display_name(line: str) -> str:
-    """Հանում է սերվերի ընթերցելի անունը config line-ից (այն, ինչ գրված է #-ից հետո, ինչպես հավելվածում է երևում)։"""
-    if '#' in line:
-        raw_name = line.split('#', 1)[1]
-        try:
-            name = unquote(raw_name)
-        except Exception:
-            name = raw_name
-        name = name.strip()
-        if name:
-            return name
-    # Եթե անուն չկա, ցույց տանք protocol + host-ը՝ որպես fallback
-    preview = (line[:40] + '...') if len(line) > 40 else line
-    return preview
-
-
 @bot.message_handler(commands=['list_and_delete'])
 def list_and_delete(message):
     if message.chat.id != ADMIN_ID:
@@ -914,18 +892,10 @@ def list_and_delete(message):
         markup = types.InlineKeyboardMarkup(row_width=1)
         buttons = []
         for i, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped:
+            if not line.strip():
                 continue
-            # Բաց ենք թողնում header/comment տողերը (#profile-title, #announce և այլն)
-            # և ցույց ենք տալիս միայն իրական սերվեր-config տողերը
-            if not stripped.lower().startswith(SERVER_LINE_PREFIXES):
-                continue
-            display_name = extract_server_display_name(stripped)
-            # Telegram button տեքստի սահմանաչափի պատճառով կրճատում ենք երկար անունները
-            if len(display_name) > 55:
-                display_name = display_name[:52] + '...'
-            buttons.append(types.InlineKeyboardButton(f"❌ {display_name}", callback_data=f"del_line_{i}"))
+            preview = (line[:30] + '...') if len(line) > 30 else line
+            buttons.append(types.InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_line_{i}"))
         if not buttons:
             bot.send_message(ADMIN_ID, "ℹ️ Ջնջելու սերվեր չկա:")
             return
@@ -944,15 +914,13 @@ def process_delete_line(call):
         line_index = int(call.data.split('_')[2])
         repo, contents = get_sub_file_contents()
         lines = contents.decoded_content.decode('utf-8').split('\n')
-        deleted_name = extract_server_display_name(lines[line_index].strip()) if 0 <= line_index < len(lines) else None
         del lines[line_index]
         new_content = '\n'.join(lines)
         repo.update_file(contents.path, f"Deleted line {line_index + 1}", new_content, contents.sha)
-        confirmation_text = f"✅ Ջնջվեց՝ {deleted_name}" if deleted_name else f"✅ {line_index + 1}-րդ տողը ջնջվեց!"
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            text=confirmation_text,
+            text=f"✅ {line_index + 1}-րդ տողը ջնջվեց!",
             reply_markup=None,
         )
         bot.answer_callback_query(call.id)
@@ -1023,22 +991,8 @@ def custom_button_handler(message):
         "SELECT response_hy, response_ru FROM custom_buttons WHERE label_hy = %s OR label_ru = %s",
         (message.text, message.text), fetchone=True
     )
-    if not row:
-        return
-    response_text = row[0] if lang == 'hy' else row[1]
-
-    # Եթե պատասխանի մեջ link կա, ավտոմատ ուղարկում ենք նաև այդ link-ի QR կոդը
-    url_match = re.search(r'https?://\S+', response_text or '')
-    if url_match:
-        link = url_match.group(0).rstrip('.,)')
-        try:
-            qr_image = generate_qr(link)
-            bot.send_photo(message.chat.id, qr_image, caption=response_text)
-            return
-        except Exception:
-            pass  # Եթե QR-ի ստեղծումը ձախողվի, ուղղակի տեքստը ուղարկենք
-
-    bot.send_message(message.chat.id, response_text)
+    if row:
+        bot.send_message(message.chat.id, row[0] if lang == 'hy' else row[1])
 
 
 # === ALL OTHER MESSAGES → FORWARDED TO ADMIN, with ID and profile link ===
