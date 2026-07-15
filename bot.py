@@ -1,6 +1,7 @@
 import os
 import time
 from io import BytesIO
+from urllib.parse import unquote
 
 import psycopg2
 import psycopg2.pool
@@ -879,6 +880,26 @@ def delete_sub_keyword_cmd(message):
         bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
 
 
+# Protocol prefixները, որոնցով սկսվող տողերը իրական սերվեր-config են (ոչ թե header/comment)
+SERVER_LINE_PREFIXES = ('vless://', 'vmess://', 'trojan://', 'ss://', 'hysteria://', 'hysteria2://', 'hy2://', 'tuic://')
+
+
+def extract_server_display_name(line: str) -> str:
+    """Հանում է սերվերի ընթերցելի անունը config line-ից (այն, ինչ գրված է #-ից հետո, ինչպես հավելվածում է երևում)։"""
+    if '#' in line:
+        raw_name = line.split('#', 1)[1]
+        try:
+            name = unquote(raw_name)
+        except Exception:
+            name = raw_name
+        name = name.strip()
+        if name:
+            return name
+    # Եթե անուն չկա, ցույց տանք protocol + host-ը՝ որպես fallback
+    preview = (line[:40] + '...') if len(line) > 40 else line
+    return preview
+
+
 @bot.message_handler(commands=['list_and_delete'])
 def list_and_delete(message):
     if message.chat.id != ADMIN_ID:
@@ -892,10 +913,18 @@ def list_and_delete(message):
         markup = types.InlineKeyboardMarkup(row_width=1)
         buttons = []
         for i, line in enumerate(lines):
-            if not line.strip():
+            stripped = line.strip()
+            if not stripped:
                 continue
-            preview = (line[:30] + '...') if len(line) > 30 else line
-            buttons.append(types.InlineKeyboardButton(f"❌ {preview}", callback_data=f"del_line_{i}"))
+            # Բաց ենք թողնում header/comment տողերը (#profile-title, #announce և այլն)
+            # և ցույց ենք տալիս միայն իրական սերվեր-config տողերը
+            if not stripped.lower().startswith(SERVER_LINE_PREFIXES):
+                continue
+            display_name = extract_server_display_name(stripped)
+            # Telegram button տեքստի սահմանաչափի պատճառով կրճատում ենք երկար անունները
+            if len(display_name) > 55:
+                display_name = display_name[:52] + '...'
+            buttons.append(types.InlineKeyboardButton(f"❌ {display_name}", callback_data=f"del_line_{i}"))
         if not buttons:
             bot.send_message(ADMIN_ID, "ℹ️ Ջնջելու սերվեր չկա:")
             return
@@ -914,13 +943,15 @@ def process_delete_line(call):
         line_index = int(call.data.split('_')[2])
         repo, contents = get_sub_file_contents()
         lines = contents.decoded_content.decode('utf-8').split('\n')
+        deleted_name = extract_server_display_name(lines[line_index].strip()) if 0 <= line_index < len(lines) else None
         del lines[line_index]
         new_content = '\n'.join(lines)
         repo.update_file(contents.path, f"Deleted line {line_index + 1}", new_content, contents.sha)
+        confirmation_text = f"✅ Ջնջվեց՝ {deleted_name}" if deleted_name else f"✅ {line_index + 1}-րդ տողը ջնջվեց!"
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            text=f"✅ {line_index + 1}-րդ տողը ջնջվեց!",
+            text=confirmation_text,
             reply_markup=None,
         )
         bot.answer_callback_query(call.id)
