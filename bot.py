@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from io import BytesIO
 from urllib.parse import unquote
@@ -1022,8 +1023,22 @@ def custom_button_handler(message):
         "SELECT response_hy, response_ru FROM custom_buttons WHERE label_hy = %s OR label_ru = %s",
         (message.text, message.text), fetchone=True
     )
-    if row:
-        bot.send_message(message.chat.id, row[0] if lang == 'hy' else row[1])
+    if not row:
+        return
+    response_text = row[0] if lang == 'hy' else row[1]
+
+    # Եթե պատասխանի մեջ link կա, ավտոմատ ուղարկում ենք նաև այդ link-ի QR կոդը
+    url_match = re.search(r'https?://\S+', response_text or '')
+    if url_match:
+        link = url_match.group(0).rstrip('.,)')
+        try:
+            qr_image = generate_qr(link)
+            bot.send_photo(message.chat.id, qr_image, caption=response_text)
+            return
+        except Exception:
+            pass  # Եթե QR-ի ստեղծումը ձախողվի, ուղղակի տեքստը ուղարկենք
+
+    bot.send_message(message.chat.id, response_text)
 
 
 # === ALL OTHER MESSAGES → FORWARDED TO ADMIN, with ID and profile link ===
