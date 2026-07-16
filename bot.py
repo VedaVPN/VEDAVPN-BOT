@@ -55,6 +55,29 @@ STORE_LINKS = {
 }
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
+
+# --- Պաշտպանել բոտի ուղարկած հաղորդագրությունները переслать/պատճենումից ---
+# Բոլոր send_message / send_photo կանչերը (բացի ադմինի հետ զրույցից)
+# ավտոմատ ստանում են protect_content=True, որպեսզի օգտատերը չկարողանա
+# ոչ переслать անել, ոչ պատճենել (copy) բոտի ուղարկած տեքստը/նկարը/QR-ը։
+_orig_send_message = bot.send_message
+_orig_send_photo = bot.send_photo
+
+
+def _protected_send_message(chat_id, *args, **kwargs):
+    if int(chat_id) != ADMIN_ID:
+        kwargs.setdefault('protect_content', True)
+    return _orig_send_message(chat_id, *args, **kwargs)
+
+
+def _protected_send_photo(chat_id, *args, **kwargs):
+    if int(chat_id) != ADMIN_ID:
+        kwargs.setdefault('protect_content', True)
+    return _orig_send_photo(chat_id, *args, **kwargs)
+
+
+bot.send_message = _protected_send_message
+bot.send_photo = _protected_send_photo
 app = Flask(__name__)
 
 
@@ -451,7 +474,11 @@ def send_vpn_link(chat_id, lang):
     link = get_config('vpn_link')
     caption = get_content('text_vpn_caption', lang).format(link=link)
     qr_bio = generate_qr(link)
-    bot.send_photo(chat_id, qr_bio, caption=caption, reply_markup=build_app_markup(chat_id, lang))
+    bot.send_photo(
+        chat_id, qr_bio, caption=caption,
+        reply_markup=build_app_markup(chat_id, lang),
+        protect_content=True,
+    )
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("device_android", "device_ios"))
@@ -1289,10 +1316,34 @@ def custom_button_handler(message):
         bot.send_message(message.chat.id, row[0] if lang == 'hy' else row[1])
 
 
+# Բոլոր մենյուի կոճակների key-երը, որոնց տեքստը երբեք չպետք է
+# փոխանցվի աջակցությանը որպես "նոր հաղորդագրություն"
+MENU_BUTTON_KEYS = [
+    'btn_get_vpn', 'btn_referrals', 'btn_howto', 'btn_faq',
+    'btn_support', 'btn_forum', 'btn_iptv', 'btn_info',
+    'btn_terms', 'btn_privacy',
+]
+
+
+def is_menu_button(text):
+    if not text:
+        return False
+    for key in MENU_BUTTON_KEYS:
+        if text == get_content(key, 'hy') or text == get_content(key, 'ru'):
+            return True
+    row = db_execute(
+        "SELECT 1 FROM custom_buttons WHERE label_hy = %s OR label_ru = %s",
+        (text, text), fetchone=True
+    )
+    return row is not None
+
+
 # === ALL OTHER MESSAGES → FORWARDED TO ADMIN, with ID and profile link ===
 @bot.message_handler(func=lambda m: True)
 def forward_to_admin(message):
     if message.chat.id == ADMIN_ID:
+        return
+    if is_menu_button(message.text):
         return
     user = message.from_user
     username = f"@{user.username}" if user.username else "(username չկա)"
@@ -1307,7 +1358,7 @@ def forward_to_admin(message):
     )
     try:
         bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
-        bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
+        bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
     except Exception:
         pass
 
