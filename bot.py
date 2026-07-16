@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from io import BytesIO
 from urllib.parse import unquote
@@ -468,6 +469,67 @@ def switch_device(call):
     bot.answer_callback_query(call.id)
 
 
+# === CAPTCHA (only shown to brand-new users, to block bots/fake ref accounts) ===
+# In-memory is enough here: telebot runs threaded=False / single process,
+# and a captcha only needs to survive a few seconds until the user taps a button.
+PENDING_CAPTCHA = {}
+CAPTCHA_TIMEOUT = 90  # seconds
+
+
+def send_captcha(user_id, ref_id):
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    correct = a + b
+
+    wrong_pool = [correct + d for d in (-3, -2, -1, 1, 2, 3) if correct + d >= 0]
+    wrong = random.sample(wrong_pool, 3)
+    options = wrong + [correct]
+    random.shuffle(options)
+
+    PENDING_CAPTCHA[user_id] = {'answer': correct, 'ref_id': ref_id, 'ts': time.time()}
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(*[types.InlineKeyboardButton(str(opt), callback_data=f"captcha_{opt}") for opt in options])
+    bot.send_message(
+        user_id,
+        f"🤖 Հաստատեք, որ ռոբոտ չեք / Подтвердите, что вы не робот\n\n<b>{a} + {b} = ?</b>",
+        reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('captcha_'))
+def process_captcha(call):
+    user_id = call.from_user.id
+    pending = PENDING_CAPTCHA.get(user_id)
+
+    if not pending or time.time() - pending['ts'] > CAPTCHA_TIMEOUT:
+        PENDING_CAPTCHA.pop(user_id, None)
+        bot.answer_callback_query(call.id, "⏰ Ժամկետը լրացել է / Время истекло. /start")
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    chosen = int(call.data.split('_')[1])
+    if chosen != pending['answer']:
+        bot.answer_callback_query(call.id, "❌ Սխալ / Неверно")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        send_captcha(user_id, pending['ref_id'])
+        return
+
+    ref_id = pending['ref_id']
+    PENDING_CAPTCHA.pop(user_id, None)
+    bot.answer_callback_query(call.id, "✅ OK")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    finish_start(user_id, ref_id)
+
+
 # === START ===
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -475,6 +537,16 @@ def start(message):
     args = message.text.split()
     ref_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
 
+    # Only brand-new users need to pass the captcha; returning users skip straight through.
+    already_registered = db_execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    if not already_registered:
+        send_captcha(user_id, ref_id)
+        return
+
+    finish_start(user_id, ref_id)
+
+
+def finish_start(user_id, ref_id):
     db_execute(
         "INSERT INTO users (user_id, ref_by) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
         (user_id, ref_id), commit=True
