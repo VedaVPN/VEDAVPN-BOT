@@ -1,6 +1,7 @@
 import os
 import time
 from io import BytesIO
+from urllib.parse import unquote
 
 import psycopg2
 import psycopg2.pool
@@ -643,7 +644,7 @@ def admin_panel(message):
         ADMIN_ID,
         f"📊 Օգտատերեր: {total}\n\n"
         f"<b>Հրամաններ.</b>\n"
-        f"/broadcast տեքստ — ուղարկել բոլորին\n"
+        f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
         f"/reply ID տեքստ — պատասխանել user-ի\n"
         f"/listkeys — ցույց տալ բոլոր editable content key-ները\n"
         f"/getcontent key — ցույց տալ key-ի ընթացիկ hy/ru արժեքները\n"
@@ -667,25 +668,64 @@ def admin_panel(message):
     )
 
 
-@bot.message_handler(commands=['broadcast'])
-def broadcast(message):
+def _do_broadcast(message):
     if message.chat.id != ADMIN_ID:
         return
-    try:
-        text = message.text.split(maxsplit=1)[1]
-    except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /broadcast տեքստ")
-        return
+
+    photo_id = message.photo[-1].file_id if message.photo else None
+    video_id = message.video.file_id if message.video else None
+
+    if photo_id or video_id:
+        parts = (message.caption or '').strip().split(maxsplit=1)
+        text = parts[1] if len(parts) > 1 else ""
+    else:
+        try:
+            text = message.text.split(maxsplit=1)[1]
+        except IndexError:
+            bot.send_message(
+                ADMIN_ID,
+                "❌ Օգտագործիր՝\n"
+                "<code>/broadcast տեքստ</code>\n"
+                "կամ ուղարկիր նկար/վիդեո՝ caption-ում գրելով.\n"
+                "<code>/broadcast տեքստ</code>"
+            )
+            return
 
     users = db_execute("SELECT user_id FROM users", fetchall=True) or []
     sent = 0
     for (uid,) in users:
         try:
-            bot.send_message(uid, text)
+            if photo_id:
+                bot.send_photo(uid, photo_id, caption=text or None)
+            elif video_id:
+                bot.send_video(uid, video_id, caption=text or None)
+            else:
+                bot.send_message(uid, text)
             sent += 1
         except Exception:
             continue
     bot.send_message(ADMIN_ID, f"✅ Ուղարկված է {sent} օգտատերի")
+
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    _do_broadcast(message)
+
+
+@bot.message_handler(
+    content_types=['photo'],
+    func=lambda m: m.chat.id == ADMIN_ID and m.caption and m.caption.strip().split()[0] == '/broadcast'
+)
+def broadcast_with_photo(message):
+    _do_broadcast(message)
+
+
+@bot.message_handler(
+    content_types=['video'],
+    func=lambda m: m.chat.id == ADMIN_ID and m.caption and m.caption.strip().split()[0] == '/broadcast'
+)
+def broadcast_with_video(message):
+    _do_broadcast(message)
 
 
 @bot.message_handler(commands=['reply'])
@@ -995,7 +1035,7 @@ def extract_server_name(line):
         try:
             parts = line.split('#')
             if len(parts) > 1:
-                name = parts[-1].strip()
+                name = unquote(parts[-1].strip())
                 if name:
                     # Get protocol type
                     protocol = line.split('://')[0].upper()
@@ -1009,7 +1049,7 @@ def extract_server_name(line):
             protocol = line.split('://')[0].upper()
             # Try to extract a name or use shortened URL
             if '#' in line:
-                name = line.split('#')[-1].strip()
+                name = unquote(line.split('#')[-1].strip())
             else:
                 name = f"Server"
             return name, protocol
