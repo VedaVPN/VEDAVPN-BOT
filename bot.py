@@ -1,11 +1,8 @@
-import hashlib
-import hmac
-import json
 import os
 import random
 import time
 from io import BytesIO
-from urllib.parse import unquote, parse_qsl
+from urllib.parse import unquote, quote
 
 import psycopg2
 import psycopg2.pool
@@ -45,11 +42,6 @@ SUPABASE_URL = os.environ.get(
 WEBHOOK_HOST = os.environ.get('RENDER_EXTERNAL_URL', 'https://your-app-name.onrender.com')
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
-
-# Անձնական կաբինետի WebApp-ի հասցեն. նույն Render domain-ը, ինչ webhook-ը,
-# այնպես որ ոչ մի արտաքին hosting (GitHub Pages) այլևս պետք չէ։
-CABINET_PATH = '/cabinet'
-CABINET_URL = WEBHOOK_HOST + CABINET_PATH
 
 STORE_LINKS = {
     'happ': {
@@ -127,6 +119,8 @@ def init_db():
     # Android/iPhone choice). IF NOT EXISTS handles the case where
     # the column already exists.
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS device TEXT", commit=True)
+    # Գրանցման ամսաթիվ՝ «նոր օգտատերեր այսօր/շաբաթ» վիճակագրության համար
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()", commit=True)
     # Bilingual texts (buttons, FAQ, howto, etc.)
     db_execute('''CREATE TABLE IF NOT EXISTS content
                 (key TEXT, lang TEXT, value TEXT, PRIMARY KEY (key, lang))''', commit=True)
@@ -152,6 +146,8 @@ CONTENT_DEFAULTS = {
     'btn_info':      {'hy': "📜 Պայմաններ և գաղտնիություն", 'ru': "📜 Условия и конфиденциальность"},
     'btn_terms':     {'hy': "📄 Օգտագործման պայմաններ", 'ru': "📄 Условия использования"},
     'btn_privacy':   {'hy': "🔒 Գաղտնիության քաղաքականություն", 'ru': "🔒 Политика конфиденциальности"},
+    'btn_back':      {'hy': "⬅️ Հետ", 'ru': "⬅️ Назад"},
+    'btn_main_menu': {'hy': "🏠 Գլխավոր մենյու", 'ru': "🏠 Главное меню"},
 
     'text_choose_lang': {
         'hy': "🌍 Ընտրեք լեզուն / Выберите язык:",
@@ -260,8 +256,8 @@ CONTENT_DEFAULTS = {
             "📄 <b>Условия использования</b>\n\n"
             "Используя этого Telegram-бота и сервис VedaVPN, вы соглашаетесь со следующими условиями.\n\n"
             "<b>1. Описание сервиса</b>\n"
-            "VedaVPN предоставляет бесплатный доступ к VPN и IPTV подписчикам нашего Telegram-канала в качестве бонуса. Сервис может быть изменён, ограничен или прекращён в любой момент без предварительного уведомления.\n\n"
-            "<b>2. Условие пользования</b>\n"
+            "VedaVPN предоставляет бесплатный доступ к VPN и IPTV подписчикам нашего Telegram-канала в качестве бонуса. Сервис может быть изменён, ограничен или прекращён в любой мо����ент без предварительного уведомления.\n\n"
+            "<b>2. Усл������вие пользования</b>\n"
             "Для сохранения активной VPN-ссылки необходимо оставаться подписанным на наш канал. При отписке доступ может быть ограничен.\n\n"
             "<b>3. Допустимое использование</b>\n"
             "Запрещается использовать сервис для незаконной деятельности, нарушения прав третьих лиц или во вредоносных целях.\n\n"
@@ -352,7 +348,7 @@ CONTENT_DEFAULTS = {
             "Եթե ցանկանում եք շարունակել օգտվել VPN-ից, խնդրում ենք նորից բաժանորդագրվել։"
         ),
         'ru': (
-            "⚠️ <b>Вы отписались от канала</b>\n\n"
+            "⚠️ <b>Вы отпис��лись от канала</b>\n\n"
             "VPN доступен только подписчикам нашего канала. "
             "Если хотите продолжать пользоваться VPN, пожалуйста, подпишитесь снова."
         ),
@@ -470,11 +466,44 @@ def build_app_markup(user_id, lang):
     return markup
 
 
+def show_typing(chat_id):
+    """«Տպում է...» ինդիկատոր՝ ավելի կենդանի զգացողության համար։"""
+    try:
+        bot.send_chat_action(chat_id, 'typing')
+    except Exception:
+        pass
+
+
+def build_nav_markup(lang, back_callback=None, extra_rows=None):
+    """Միասնական navigation՝ ընտրովի «⬅️ Հետ» + միշտ «🏠 Գլխավոր մենյու»։"""
+    markup = types.InlineKeyboardMarkup()
+    if extra_rows:
+        for btn in extra_rows:
+            markup.add(btn)
+    nav = []
+    if back_callback:
+        nav.append(types.InlineKeyboardButton(get_content("btn_back", lang), callback_data=back_callback))
+    nav.append(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+    markup.add(*nav)
+    return markup
+
+
 def build_info_markup(lang):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton(get_content("btn_terms", lang), callback_data="info_terms"),
         types.InlineKeyboardButton(get_content("btn_privacy", lang), callback_data="info_privacy"),
+    )
+    markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+    return markup
+
+
+def build_back_markup(lang, callback_data="info_back"):
+    """«⬅️ Հետ» + «🏠 Գլխավոր մենյու» կոճակներ՝ inline ենթաէջերի համար։"""
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton(get_content("btn_back", lang), callback_data=callback_data),
+        types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
     )
     return markup
 
@@ -482,11 +511,14 @@ def send_vpn_link(chat_id, lang):
     link = get_config('vpn_link')
     caption = get_content('text_vpn_caption', lang).format(link=link)
     qr_bio = generate_qr(link)
+    show_typing(chat_id)
     bot.send_photo(
         chat_id, qr_bio, caption=caption,
         reply_markup=build_app_markup(chat_id, lang),
         protect_content=True,
     )
+    done = "✅ Պատրաստ է՝ քո VPN հղումը վերևում է։" if lang == 'hy' else "✅ Готово — ваша VPN-ссылка выше։"
+    bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("device_android", "device_ios"))
@@ -501,7 +533,8 @@ def switch_device(call):
         )
     except Exception:
         pass
-    bot.answer_callback_query(call.id)
+    ok = "✅ Սարքը փոխվեց" if lang == 'hy' else "✅ Устройство изменено"
+    bot.answer_callback_query(call.id, ok)
 
 
 # === CAPTCHA (only shown to brand-new users, to block bots/fake ref accounts) ===
@@ -526,7 +559,7 @@ def send_captcha(user_id, ref_id):
     markup.add(*[types.InlineKeyboardButton(str(opt), callback_data=f"captcha_{opt}") for opt in options])
     bot.send_message(
         user_id,
-        f"🤖 Հաստատեք, որ ռոբոտ չեք / Подтвердите, что вы не робот\n\n<b>{a} + {b} = ?</b>",
+        f"🤖 Հաստատեք, որ ռոբոտ չեք / Подтвердите, ч��о вы не робот\n\n<b>{a} + {b} = ?</b>",
         reply_markup=markup
     )
 
@@ -562,7 +595,7 @@ def process_captcha(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
         pass
-    finish_start(user_id, ref_id)
+    finish_start(user_id, ref_id, call.from_user.first_name)
 
 
 # === START ===
@@ -578,10 +611,10 @@ def start(message):
         send_captcha(user_id, ref_id)
         return
 
-    finish_start(user_id, ref_id)
+    finish_start(user_id, ref_id, message.from_user.first_name)
 
 
-def finish_start(user_id, ref_id):
+def finish_start(user_id, ref_id, name=""):
     db_execute(
         "INSERT INTO users (user_id, ref_by) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
         (user_id, ref_id), commit=True
@@ -592,6 +625,9 @@ def finish_start(user_id, ref_id):
     # Remove the old menu buttons shown below, until the language is chosen
     welcome_photo = get_config('welcome_photo')
     welcome_caption = get_content('text_welcome', 'ru')
+    name = (name or "").strip()
+    if name:
+        welcome_caption = f"👋 {name}!\n\n" + welcome_caption
     if welcome_photo:
         try:
             bot.send_photo(user_id, welcome_photo, caption=welcome_caption, reply_markup=types.ReplyKeyboardRemove())
@@ -610,7 +646,12 @@ def finish_start(user_id, ref_id):
 def set_lang(call):
     lang = call.data.split('_')[1]
     db_execute("UPDATE users SET lang = %s WHERE user_id = %s", (lang, call.from_user.id), commit=True)
-    bot.send_message(call.from_user.id, "✅", reply_markup=get_main_menu(lang))
+    name = (call.from_user.first_name or "").strip()
+    if lang == 'hy':
+        greeting = f"Բարև, {name} 👋 Բարի գալուստ VedaVPN 🛡" if name else "Բարև 👋 Բարի գալուստ VedaVPN 🛡"
+    else:
+        greeting = f"Привет, {name} 👋 Добро пожаловать в VedaVPN 🛡" if name else "Привет 👋 Добро пожаловать в VedaVPN 🛡"
+    bot.send_message(call.from_user.id, greeting, reply_markup=get_main_menu(lang))
 
 
 # === VPN CHECK ===
@@ -645,14 +686,16 @@ def check_sub_callback(call):
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_howto', 'hy'), get_content('btn_howto', 'ru')))
 def howto(message):
     lang = get_lang(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_howto', lang))
+    show_typing(message.chat.id)
+    bot.send_message(message.chat.id, get_content('text_howto', lang), reply_markup=build_nav_markup(lang))
 
 
 # === FAQ ===
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_faq', 'hy'), get_content('btn_faq', 'ru')))
 def faq(message):
     lang = get_lang(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_faq', lang))
+    show_typing(message.chat.id)
+    bot.send_message(message.chat.id, get_content('text_faq', lang), reply_markup=build_nav_markup(lang))
 
 
 # === AUTOMATIC UNSUBSCRIBE WARNING ===
@@ -672,7 +715,7 @@ def handle_membership_change(update):
 
         if was_subscribed and now_unsubscribed:
             lang = get_lang(user_id)
-            btn_text = "📢 Բաժանորդագրվել կրկին" if lang == 'hy' else "📢 Подписаться снова"
+            btn_text = "📢 Բաժանորդագրվե�� կրկին" if lang == 'hy' else "📢 Подписаться снова"
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton(btn_text, url=f"https://t.me/{channel_username}"))
             bot.send_message(user_id, get_content('text_unsub_warning', lang), reply_markup=markup, parse_mode="HTML")
@@ -681,54 +724,159 @@ def handle_membership_change(update):
 
 
 # === REFERRALS, FORUM ===
+# === REFERRAL TIERS ===
+# (շեմ, badge, հայերեն անուն, ռուսերեն անուն)
+REF_TIERS = [
+    (0, "🔰", "Սկսնակ", "Новичок"),
+    (1, "🥉", "Բրонզ", "Бронза"),
+    (5, "🥈", "Արծաթ", "Серебро"),
+    (10, "🥇", "Ոսկի", "Золото"),
+    (20, "💎", "Ադամանդ", "Алмаз"),
+]
+
+
+def get_ref_tier(count, lang):
+    """Վերադարձնում է ռեֆերալ մակարդակի badge-ը և progress-ը մինչև հաջորդ մակարդակը։"""
+    current = REF_TIERS[0]
+    nxt = None
+    for i, tier in enumerate(REF_TIERS):
+        if count >= tier[0]:
+            current = tier
+            nxt = REF_TIERS[i + 1] if i + 1 < len(REF_TIERS) else None
+    badge = current[1]
+    name = current[2] if lang == 'hy' else current[3]
+
+    if nxt:
+        need = nxt[0] - count
+        span = nxt[0] - current[0]
+        filled = int(((count - current[0]) / span) * 5) if span else 0
+        filled = max(0, min(5, filled))
+        bar = "▰" * filled + "▱" * (5 - filled)
+        nxt_name = nxt[2] if lang == 'hy' else nxt[3]
+        if lang == 'hy':
+            progress = f"{bar}\n⬆️ Եւս {need} հրավեր → {nxt[1]} {nxt_name}"
+        else:
+            progress = f"{bar}\n⬆️ Ещё {need} приглашений → {nxt[1]} {nxt_name}"
+    else:
+        bar = "▰▰▰▰▰"
+        top_msg = "👑 Առավելագույն մակարդակն է՝ հասած ես!" if lang == 'hy' else "👑 Достигнут максимальный уровень!"
+        progress = f"{bar}\n{top_msg}"
+
+    if lang == 'hy':
+        header = f"{badge} Ձեր մակարդակը՝ <b>{name}</b>"
+    else:
+        header = f"{badge} Ваш уровень: <b>{name}</b>"
+    return f"{header}\n{progress}"
+
+
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_referrals', 'hy'), get_content('btn_referrals', 'ru')))
 def show_refs(message):
     lang = get_lang(message.chat.id)
     row = db_execute("SELECT ref_count FROM users WHERE user_id = %s", (message.chat.id,), fetchone=True)
     count = row[0] if row else 0
+    tier_line = get_ref_tier(count, lang)
     if lang == 'hy':
         text = f"👥 Ձեր հրավիրած օգտատերերը՝ {count}\n🔗 Հղում՝ https://t.me/vedavpn_bot?start={message.chat.id}"
     else:
         text = f"👥 Ваших рефералов: {count}\n🔗 Ссылка: https://t.me/vedavpn_bot?start={message.chat.id}"
-    bot.send_message(message.chat.id, text)
+    show_typing(message.chat.id)
+    ref_link = f"https://t.me/vedavpn_bot?start={message.chat.id}"
+    if lang == 'hy':
+        share_text = "🛡 Անվճար VPN VedaVPN-ից՝ միացիր իմ հղումով 👇"
+        share_label = "📤 Կիսվել ընկերոջ հետ"
+    else:
+        share_text = "🛡 Бесплатный VPN от VedaVPN — подключайся по моей ссылке 👇"
+        share_label = "📤 Поделиться с другом"
+    share_url = f"https://t.me/share/url?url={quote(ref_link)}&text={quote(share_text)}"
+    share_btn = types.InlineKeyboardButton(share_label, url=share_url)
+    lb_label = "🏆 Թոփ-10 հրավիրողներ" if lang == 'hy' else "🏆 Топ-10 приглашающих"
+    lb_btn = types.InlineKeyboardButton(lb_label, callback_data="ref_leaderboard")
+    text = tier_line + "\n\n" + text
+    bot.send_message(message.chat.id, text, reply_markup=build_nav_markup(lang, extra_rows=[share_btn, lb_btn]))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ref_leaderboard")
+def ref_leaderboard(call):
+    """🏆 Թոփ-10 հրավիրողների leaderboardը։"""
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    top = db_execute(
+        "SELECT user_id, ref_count FROM users WHERE ref_count > 0 ORDER BY ref_count DESC, user_id ASC LIMIT 10",
+        fetchall=True
+    ) or []
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    if lang == 'hy':
+        title = "🏆 <b>Թոփ-10 հրավիրողներ</b>"
+        empty = "Դեռ ոչ ոք չունի հրավերներ։ Եղիր առաջինը 🚀"
+        you_label = "Դու"
+        unit = "հրավեր"
+    else:
+        title = "🏆 <b>Топ-10 приглашающих</b>"
+        empty = "Пока ни у кого нет приглашений. Стань первым 🚀"
+        you_label = "Вы"
+        unit = "приглаш."
+    if not top:
+        bot.send_message(call.from_user.id, f"{title}\n\n{empty}", reply_markup=build_nav_markup(lang))
+        return
+    lines = [title, ""]
+    for i, (uid, cnt) in enumerate(top, 1):
+        rank = medals.get(i, f"{i}.")
+        tag = f" 👈 {you_label}" if uid == call.from_user.id else ""
+        masked = f"…{str(uid)[-4:]}"
+        lines.append(f"{rank} <code>{masked}</code> — {cnt} {unit}{tag}")
+    if not any(uid == call.from_user.id for uid, _ in top):
+        row = db_execute("SELECT ref_count FROM users WHERE user_id = %s", (call.from_user.id,), fetchone=True)
+        my_count = row[0] if row and row[0] else 0
+        if my_count > 0:
+            rank_row = db_execute("SELECT COUNT(*) + 1 FROM users WHERE ref_count > %s", (my_count,), fetchone=True)
+            my_rank = rank_row[0] if rank_row else "?"
+            lines.append("")
+            if lang == 'hy':
+                lines.append(f"➖➖➖\n{you_label}՝ #{my_rank} տեղում ({my_count} {unit})")
+            else:
+                lines.append(f"➖➖➖\n{you_label}: #{my_rank} место ({my_count} {unit})")
+    bot.send_message(call.from_user.id, "\n".join(lines), reply_markup=build_nav_markup(lang))
 
 
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_forum', 'hy'), get_content('btn_forum', 'ru')))
 def forum(message):
     lang = get_lang(message.chat.id)
-    markup = types.InlineKeyboardMarkup()
+    show_typing(message.chat.id)
     btn_text = "🔗 Ֆորում" if lang == 'hy' else "🔗 Форум"
-    msg_text = "🔗 Մեր ֆորումը՝" if lang == 'hy' else "🔗 Наш форум:"
-    markup.add(types.InlineKeyboardButton(btn_text, url=get_config('forum_link')))
-    bot.send_message(message.chat.id, msg_text, reply_markup=markup)
+    msg_text = "💬 Մեր ֆորումը՝" if lang == 'hy' else "💬 Наш форум:"
+    forum_btn = types.InlineKeyboardButton(btn_text, url=get_config('forum_link'))
+    bot.send_message(message.chat.id, msg_text, reply_markup=build_nav_markup(lang, extra_rows=[forum_btn]))
 
 
 # === IPTV ===
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_iptv', 'hy'), get_content('btn_iptv', 'ru')))
 def iptv(message):
     lang = get_lang(message.chat.id)
+    show_typing(message.chat.id)
     link = get_config('iptv_link')
     if not link:
-        bot.send_message(message.chat.id, get_content('text_iptv_missing', lang))
+        bot.send_message(message.chat.id, get_content('text_iptv_missing', lang), reply_markup=build_nav_markup(lang))
         return
     caption = get_content('text_iptv_caption', lang).format(link=link)
     instructions = get_content('text_iptv_instructions', lang).strip()
     if instructions:
         caption += "\n\n" + instructions
-    bot.send_message(message.chat.id, caption)
+    bot.send_message(message.chat.id, caption, reply_markup=build_nav_markup(lang))
 
 
 # === SUPPORT ===
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_support', 'hy'), get_content('btn_support', 'ru')))
 def support(message):
     lang = get_lang(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_support_prompt', lang))
+    show_typing(message.chat.id)
+    bot.send_message(message.chat.id, get_content('text_support_prompt', lang), reply_markup=build_nav_markup(lang))
 
 
 # === TERMS & PRIVACY ===
 @bot.message_handler(func=lambda m: m.text in (get_content('btn_info', 'hy'), get_content('btn_info', 'ru')))
 def info_menu(message):
     lang = get_lang(message.chat.id)
+    show_typing(message.chat.id)
     bot.send_message(message.chat.id, get_content('text_info_prompt', lang), reply_markup=build_info_markup(lang))
 
 
@@ -737,7 +885,46 @@ def show_info_text(call):
     lang = get_lang(call.from_user.id)
     key = 'text_terms' if call.data == 'info_terms' else 'text_privacy'
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, get_content(key, lang), disable_web_page_preview=True)
+    try:
+        bot.edit_message_text(
+            get_content(key, lang),
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            disable_web_page_preview=True,
+            reply_markup=build_back_markup(lang),
+        )
+    except Exception:
+        bot.send_message(
+            call.message.chat.id, get_content(key, lang),
+            disable_web_page_preview=True, reply_markup=build_back_markup(lang),
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "info_back")
+def info_back(call):
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_text(
+            get_content('text_info_prompt', lang),
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=build_info_markup(lang),
+        )
+    except Exception:
+        bot.send_message(
+            call.message.chat.id, get_content('text_info_prompt', lang),
+            reply_markup=build_info_markup(lang),
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_menu")
+def go_main_menu(call):
+    """Ցանկացած inline բաժնից վերադարձ գլխավոր մենյու։"""
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    txt = "🏠 Գլխավոր մենյու" if lang == 'hy' else "🏠 Главное меню"
+    bot.send_message(call.from_user.id, txt, reply_markup=get_main_menu(lang))
 
 
 # === ADMIN. General stats ===
@@ -751,6 +938,7 @@ def admin_panel(message):
         ADMIN_ID,
         f"📊 Օգտատերեր: {total}\n\n"
         f"<b>Հրամաններ.</b>\n"
+        f"/stats — մանրամասն վիճակագրություն 📊\n"
         f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
         f"/reply ID տեքստ — պատասխանել user-ի\n"
         f"/listkeys — ցույց տալ բոլոր editable content key-ները\n"
@@ -762,17 +950,69 @@ def admin_panel(message):
         f"/setiptv նոր_հղում — փոխել IPTV հղումը\n"
         f"/setphoto — սահմանել ողջյունի նկարը (ուղարկիր նկար caption-ում /setphoto, կամ reply արա նկարին)\n\n"
         f"<b>Նոր կոճակներ.</b>\n"
-        f"/addbutton անուն_hy|անուն_ru|պատասխան_hy|պատասխան_ru — ավելացնել նոր կոճակ (առանց prefix, պարզապես 4 մաս | -ով)\n"
+        f"/addbutton անուն_hy|անուն_ru|պատասխան_hy|պատասխան_ru — ավելացնել նոր կոճակ (առա��ց prefix, պարզապես 4 մաս | -ով)\n"
         f"/listbuttons — ցույց տալ ավելացված կոճակները\n"
         f"/removebutton ID — հեռացնել կոճակ\n\n"
         f"<b>Sub ֆայլի կառավարում (GitHub).</b>\n"
-        f"/update_sub [տեքստ] — թարմացնել ամբողջ sub ֆայլը\n"
+        f"/update_sub [տեքստ] — թա��մացնել ամբողջ sub ֆայլը\n"
         f"/append_sub [հղում] — ավելացնել նոր սերվեր (առանց ջնջելու)\n"
         f"/delete_sub_keyword [հիմնաբառ] — ջնջել սերվերը\n"
         f"/list_and_delete — ցույց տալ սերվերները կոճակներով\n"
         f"/show_sub — ցույց տալ ֆայլի բովանդակությունը\n"
         f"/clear_sub — ջնջել բոլոր սերվերները"
     )
+
+
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    """Ընդլայնված վիճակագրություն ադմինի համար։"""
+    if message.chat.id != ADMIN_ID:
+        return
+
+    def scalar(query):
+        row = db_execute(query, fetchone=True)
+        return (row[0] if row and row[0] is not None else 0)
+
+    total = scalar("SELECT COUNT(*) FROM users")
+    today = scalar("SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE")
+    week = scalar("SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'")
+    hy = scalar("SELECT COUNT(*) FROM users WHERE lang = 'hy'")
+    ru = scalar("SELECT COUNT(*) FROM users WHERE lang = 'ru'")
+    android = scalar("SELECT COUNT(*) FROM users WHERE device = 'android'")
+    ios = scalar("SELECT COUNT(*) FROM users WHERE device = 'ios'")
+    total_refs = scalar("SELECT COALESCE(SUM(ref_count), 0) FROM users")
+    top = db_execute(
+        "SELECT user_id, ref_count FROM users WHERE ref_count > 0 ORDER BY ref_count DESC LIMIT 5",
+        fetchall=True
+    ) or []
+
+    def pct(n):
+        return f"{n * 100 // total}%" if total else "0%"
+
+    lines = [
+        "📊 <b>Ընդլայնված վիճակագրություն</b>",
+        "",
+        f"👥 Ընդհանուր օգտատերեր՝ <b>{total}</b>",
+        f"🆕 Այսօր՝ <b>{today}</b>",
+        f"📅 Վերջին 7 օրը՝ <b>{week}</b>",
+        "",
+        "<b>🌍 Լեզուներ</b>",
+        f"🇦🇢 Հայերեն՝ {hy} ({pct(hy)})",
+        f"🇷🇺 Русский՝ {ru} ({pct(ru)})",
+        "",
+        "<b>📱 Սարքեր</b>",
+        f"🤖 Android՝ {android}",
+        f"🍏 iPhone՝ {ios}",
+        "",
+        f"🔗 Ընդհանուր ռեֆերալներ՝ <b>{total_refs}</b>",
+    ]
+    if top:
+        lines.append("")
+        lines.append("<b>🏆 Թոփ հրավիրողներ</b>")
+        for i, (uid, cnt) in enumerate(top, 1):
+            lines.append(f"{i}. <code>{uid}</code> — {cnt}")
+
+    bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
 
 
 def _do_broadcast(message):
@@ -1028,7 +1268,7 @@ def list_buttons_cmd(message):
         return
     rows = db_execute("SELECT id, label_hy, label_ru FROM custom_buttons", fetchall=True) or []
     if not rows:
-        bot.send_message(ADMIN_ID, "ℹ️ Ավելացված custom կոճակներ չկան։")
+        bot.send_message(ADMIN_ID, "ℹ️ Ավել��ցված custom կոճակներ չկան։")
         return
     text = "📋 <b>Custom կոճակներ.</b>\n\n" + "\n".join(
         f"<code>{bid}</code>. {hy} / {ru}" for bid, hy, ru in rows
@@ -1217,7 +1457,7 @@ def list_and_delete(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('del_line_'))
 def process_delete_line(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Միայն ադմինը կարող է:")
+        bot.answer_callback_query(call.id, "Միայ�� ադմինը կարող է:")
         return
     try:
         line_index = int(call.data.split('_')[2])
@@ -1346,6 +1586,68 @@ def is_menu_button(text):
     return row is not None
 
 
+# === ԱՎՏՈՄԱՏ FAQ ՈՐՈՆՈՒՄ (auto-answer before forwarding to admin) ===
+# Երբ օգտատերը ազատ տեքստով հարց է գրում, բոտը նախ փորձում է գտնել
+# համապատասխան պատրաստի պատասխան՝ ըստ հիմնաբառերի, և միայն դրանից հետո
+# (եթե օգտատերը սեղմի «Դեռ գրել ադմինին») հաղորդագրությունը փոխանցվում է ադմինին։
+FAQ_SEARCH = [
+    {
+        'keywords': ['չի աշխատ', 'չաշխատ', 'չի միանում', 'չի բացվում', 'error', 'սխալ',
+                     'проблем', 'не работает', 'не подключ', 'не открыв', 'ошибк', 'глючит', 'тормоз'],
+        'hy': "🔧 Եթե VPN-ը չի աշխատում՝ փորձիր ընտրել այլ սերվեր հավելվածում (Happ/INCY)։ "
+              "Հաճախ մեկ սերվերը կարող է ժամանակավորապես անհասանելի լինել, իսկ մյուսները՝ աշխատել։ "
+              "Նաև ստուգիր, որ դեռ բաժանորդագրված ես ալիքին։",
+        'ru': "🔧 Если VPN не работает — попробуйте выбрать другой сервер в приложении (Happ/INCY)։ "
+              "Часто один сервер может быть временно недоступен, а другие работают։ "
+              "Также проверьте, что вы всё ещё подписаны на канал։",
+    },
+    {
+        'keywords': ['ինչպես տեղադր', 'ինչպես ավելացն', 'ինչպես միացն', 'տեղադր', 'կարգավոր', 'ինստալ',
+                     'как установ', 'как добав', 'как подключ', 'как настро', 'установить', 'инструкц'],
+        'hy': "📖 Տեղադրման քայլ առ քայլ ցուցումների համար սեղմիր «📖 Ինչպես տեղադրել» կոճակը menu-ից։",
+        'ru': "📖 Пошаговая инструкция по установке — нажмите кнопку «📖 Как установить» в меню։",
+    },
+    {
+        'keywords': ['վճար', 'գին', 'արժ', 'ինչքան', 'փող', 'անվճար',
+                     'платн', 'цен', 'стоит', 'сколько', 'деньг', 'бесплатн', 'о��лат'],
+        'hy': "💰 VPN-ը ներկայումս ամբողջությամբ անվճար է մեր ալիքի բաժանորդների համար։",
+        'ru': "💰 VPN сейчас полностью бесплатный для подписчиков нашего канала։",
+    },
+    {
+        'keywords': ['հղում', 'ստանալ vpn', 'որտեղ vpn', 'sub', 'подписк', 'ссылк', 'получить vpn', 'где vpn'],
+        'hy': "🔗 VPN հղումը ստանալու համար սեղմիր «🛡 Ստանալ VPN» կոճակը, բաժանորդագրվիր ալիքին, "
+              "և հղումը կուղարկվի ավտոմատ։",
+        'ru': "🔗 Чтобы получить VPN-ссылку, нажмите «🛡 Получить VPN», подпишитесь на канал — "
+              "ссылка придёт автоматически։",
+    },
+    {
+        'keywords': ['iptv', 'հեռուստ', 'ալիք դիտ', 'канал', 'телевид', 'тв '],
+        'hy': "📺 IPTV դիտելու համար սեղմիր «📺 IPTV» կոճակը menu-ից։",
+        'ru': "📺 Для IPTV нажмите кнопку «📺 IPTV» в меню։",
+    },
+    {
+        'keywords': ['ռեֆերալ', 'հրավ', 'ընկեր', 'бонус', 'реферал', 'пригласить', 'друз', 'bonus'],
+        'hy': "👥 Ընկերներ հրավիրելու համար բացիր «👥 Ռեֆերալներ» բաժինը՝ այնտեղ քո անձնական հղումն է։",
+        'ru': "👥 Чтобы приглашать друзей, откройте раздел «👥 Рефералы» — там ваша персональная ссылка։",
+    },
+]
+
+
+def find_faq_answer(text, lang):
+    if not text:
+        return None
+    low = text.lower()
+    for item in FAQ_SEARCH:
+        for kw in item['keywords']:
+            if kw in low:
+                return item.get(lang) or item.get('ru')
+    return None
+
+
+# Ժամանակավոր պահոց՝ FAQ-ի ավտոպատասխանից հետո ադմինին փոխանցելու համար
+PENDING_SUPPORT_MSG = {}
+
+
 # === ALL OTHER MESSAGES → FORWARDED TO ADMIN, with ID and profile link ===
 @bot.message_handler(func=lambda m: True)
 def forward_to_admin(message):
@@ -1353,6 +1655,26 @@ def forward_to_admin(message):
         return
     if is_menu_button(message.text):
         return
+
+    # Ավտոմատ FAQ որոնում. եթե գտնվի համապատասխան պատասխան, առաջարկում ենք այն
+    # և ադմինին ուղարկում միայն օգտատիրոջ հատուկ խնդրանքով։
+    lang = get_lang(message.chat.id)
+    faq_answer = find_faq_answer(message.text, lang)
+    if faq_answer:
+        PENDING_SUPPORT_MSG[message.chat.id] = {
+            'user_id': message.from_user.id,
+            'username': message.from_user.username,
+            'chat_id': message.chat.id,
+            'message_id': message.message_id,
+            'ts': time.time(),
+        }
+        intro = "💡 Հնարավոր է սա օգնի քո հարցին՝" if lang == 'hy' else "💡 Возможно, это ответит на ваш вопрос:"
+        btn = "🆘 Դեռ գրել ադմինին" if lang == 'hy' else "🆘 Всё равно написать в поддержку"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(btn, callback_data="force_support"))
+        bot.send_message(message.chat.id, f"{intro}\n\n{faq_answer}", reply_markup=markup)
+        return
+
     user = message.from_user
     username = f"@{user.username}" if user.username else "(username չկա)"
     profile_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
@@ -1371,210 +1693,37 @@ def forward_to_admin(message):
         pass
 
 
-# === WEBAPP (Անձնական կաբինետ) ===
-
-def validate_init_data(init_data: str, max_age_seconds: int = 86400):
-    """Ստուգում է Telegram-ից եկած WebApp initData-ի ստորագրությունը (HMAC),
-    որպեսզի համոզվենք՝ խնդրանքն իրոք Telegram-ից է եկել, ոչ թե կեղծված։
-    Հաջողության դեպքում վերադարձնում է parsed user dict-ը, հակառակ դեպքում՝ None։"""
+@bot.callback_query_handler(func=lambda call: call.data == "force_support")
+def force_support(call):
+    """Երբ FAQ-ը բավարար չէ՝ օգտատերը այս կոճակով կարող է հաղորդագրությունը ուղարկել ադմինին։"""
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    pending = PENDING_SUPPORT_MSG.pop(call.from_user.id, None)
     try:
-        parsed = dict(parse_qsl(init_data, strict_parsing=True))
-        received_hash = parsed.pop('hash', None)
-        if not received_hash:
-            return None
-        auth_date = int(parsed.get('auth_date', 0))
-        if max_age_seconds and (time.time() - auth_date) > max_age_seconds:
-            return None
-        data_check_string = '\n'.join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
-        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(computed_hash, received_hash):
-            return None
-        user = json.loads(parsed.get('user', '{}'))
-        return user
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
     except Exception:
-        return None
-
-
-CABINET_HTML = """<!DOCTYPE html>
-<html lang="hy">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>VedaVPN | Անձնական կաբինետ</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700;800&family=Noto+Sans+Armenian:wght@400;600;700;800&display=swap');
-  :root{
-    --bg:#12102a; --bg2:#1a1740; --amber:#f5b544; --amber2:#ffd479;
-    --ink:#f3efe6; --sub:#b9b3d6; --card:#1f1b47; --line:rgba(245,181,68,.18);
-  }
-  *{box-sizing:border-box;}
-  body{margin:0;font-family:'Noto Sans','Noto Sans Armenian',sans-serif;
-    background:radial-gradient(circle at 50% -10%, #2a2360 0%, var(--bg) 60%);
-    color:var(--ink);min-height:100vh;padding:20px 16px 40px;}
-  .top{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:22px;}
-  .top .brand{letter-spacing:.3em;font-size:13px;color:var(--sub);text-transform:uppercase;}
-  .top h1{margin:6px 0 0;font-size:26px;font-weight:800;}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:20px;
-    padding:18px;margin-bottom:14px;}
-  .row{display:flex;justify-content:space-between;align-items:center;gap:10px;}
-  .label{color:var(--sub);font-size:13px;}
-  .value{font-weight:700;font-size:16px;}
-  .pill{display:inline-flex;align-items:center;gap:6px;background:#151233;
-    border:1px solid var(--line);border-radius:999px;padding:8px 14px;font-size:13px;}
-  .devbtn{color:var(--ink);cursor:pointer;font-family:inherit;}
-  .devbtn.active{background:linear-gradient(135deg,var(--amber),var(--amber2));
-    color:#1a1130;border-color:transparent;font-weight:700;}
-  .pills{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}
-  .cta{display:block;width:100%;text-align:center;padding:16px;border-radius:16px;
-    font-weight:800;font-size:16px;text-decoration:none;border:none;cursor:pointer;
-    clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px);}
-  .cta-primary{background:linear-gradient(135deg,var(--amber),var(--amber2));color:#1a1130;margin-bottom:12px;}
-  .cta-secondary{background:transparent;border:1px solid var(--line);color:var(--ink);}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;}
-  .mini{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;text-align:left;}
-  .mini .t{font-weight:700;font-size:14px;margin-bottom:4px;}
-  .mini .d{color:var(--sub);font-size:12px;}
-  .skeleton{opacity:.5;}
-  a{color:inherit;}
-</style>
-</head>
-<body>
-  <div class="top">
-    <div class="brand">VedaVPN</div>
-    <h1 id="hello">Բարի գալուստ 👋</h1>
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <span class="label">Ձեր սարքը</span>
-    </div>
-    <div class="pills" style="margin-top:10px;">
-      <button class="pill devbtn" id="devAndroid" data-device="android">🤖 Android</button>
-      <button class="pill devbtn" id="devIos" data-device="ios">🍏 iPhone</button>
-      <span class="pill" id="refCount">👥 0 հրավեր</span>
-    </div>
-  </div>
-
-  <a class="cta cta-primary" id="connectBtn" href="#">⚡ Ներբեռնել հավելվածը</a>
-  <a class="cta cta-secondary" id="subLinkBtn" href="#">🔗 Բացել sub հղումը</a>
-  <a class="cta cta-secondary" id="inviteBtn" href="#">🎁 Հրավիրել ընկերոջ</a>
-
-  <div class="grid2">
-    <div class="mini" id="supportBtn">
-      <div class="t">🛠 Աջակցություն</div>
-      <div class="d">Հարց ունե՞ք</div>
-    </div>
-    <div class="mini" id="channelBtn">
-      <div class="t">📢 Մեր ալիքը</div>
-      <div class="d">Նորություններ</div>
-    </div>
-  </div>
-
-<script>
-  const tg = window.Telegram.WebApp;
-  tg.ready();
-  tg.expand();
-  const initData = tg.initData || "";
-  let currentData = null;
-
-  const STORE_LINKS = {
-    android: "https://play.google.com/store/apps/details?id=llc.itdev.incy",
-    ios: "https://apps.apple.com/ru/app/incy/id6756943388"
-  };
-
-  function renderDevice(device) {
-    document.getElementById("devAndroid").classList.toggle("active", device === "android");
-    document.getElementById("devIos").classList.toggle("active", device === "ios");
-    document.getElementById("connectBtn").href = STORE_LINKS[device];
-  }
-
-  async function load() {
-    try {
-      const res = await fetch("/api/cabinet?" + new URLSearchParams({init_data: initData}));
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "error");
-      currentData = data;
-
-      document.getElementById("hello").textContent = "Բարի գալուստ, " + data.first_name + " 👋";
-      document.getElementById("subLinkBtn").href = data.sub_url;
-      document.getElementById("refCount").textContent = "👥 " + data.ref_count + " հրավեր";
-      document.getElementById("inviteBtn").href = data.invite_url;
-      document.getElementById("supportBtn").onclick = () => tg.openTelegramLink(data.support_url);
-      document.getElementById("channelBtn").onclick = () => tg.openTelegramLink(data.channel_url);
-      renderDevice(data.device === "ios" ? "ios" : "android");
-    } catch (e) {
-      document.getElementById("hello").textContent = "Չհաջողվեց բեռնել տվյալները";
-    }
-  }
-
-  async function setDevice(device) {
-    renderDevice(device);
-    try {
-      await fetch("/api/cabinet/device", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({init_data: initData, device: device})
-      });
-      tg.HapticFeedback.impactOccurred("light");
-    } catch (e) { /* ignore */ }
-  }
-
-  document.getElementById("devAndroid").onclick = () => setDevice("android");
-  document.getElementById("devIos").onclick = () => setDevice("ios");
-
-  load();
-</script>
-</body>
-</html>"""
-
-
-@app.route(CABINET_PATH, methods=['GET'])
-def cabinet_page():
-    return CABINET_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
-
-
-@app.route('/api/cabinet', methods=['GET'])
-def cabinet_api():
-    init_data = request.args.get('init_data', '')
-    user = validate_init_data(init_data)
-    if not user:
-        return {'ok': False, 'error': 'invalid_init_data'}, 401
-
-    user_id = user.get('id')
-    row = db_execute(
-        "SELECT lang, ref_count, device FROM users WHERE user_id = %s",
-        (user_id,), fetchone=True
+        pass
+    if not pending or time.time() - pending['ts'] > 3600:
+        bot.send_message(call.from_user.id, get_content('text_support_prompt', lang))
+        return
+    uid = pending['user_id']
+    uname = pending.get('username')
+    username = f"@{uname}" if uname else ("(username չկա)" if lang == 'hy' else "(нет username)")
+    profile_link = f"https://t.me/{uname}" if uname else f"tg://user?id={uid}"
+    info = (
+        f"✉️ <b>Նոր հաղորդագրություն (FAQ-ից հետո)</b>\n"
+        f"👤 <b>ID:</b> <code>{uid}</code>\n"
+        f"👤 <b>Username:</b> {username}\n"
+        f"🔗 <a href=\"{profile_link}\">Profile-ը բացել</a>\n\n"
+        f"↩️ Պատասխանելու համար. <code>/reply {uid} տեքստ</code>"
     )
-    lang, ref_count, device = (row if row else ('ru', 0, 'android'))
-
-    return {
-        'ok': True,
-        'first_name': user.get('first_name', ''),
-        'lang': lang,
-        'ref_count': ref_count or 0,
-        'device': device or 'android',
-        'sub_url': WEBHOOK_HOST + '/sub',
-        'invite_url': f"https://t.me/vedavpn_bot?start={user_id}",
-        'support_url': f"https://t.me/{CHANNEL.replace('@', '')}",
-        'channel_url': f"https://t.me/{CHANNEL.replace('@', '')}",
-    }, 200
-
-
-@app.route('/api/cabinet/device', methods=['POST'])
-def cabinet_set_device():
-    payload = request.get_json(silent=True) or {}
-    user = validate_init_data(payload.get('init_data', ''))
-    if not user:
-        return {'ok': False, 'error': 'invalid_init_data'}, 401
-
-    device = payload.get('device')
-    if device not in ('android', 'ios'):
-        return {'ok': False, 'error': 'invalid_device'}, 400
-
-    set_device(user.get('id'), device)
-    return {'ok': True}, 200
+    try:
+        bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
+        bot.copy_message(ADMIN_ID, pending['chat_id'], pending['message_id'])
+        done = "✅ Ուղարկվեց ադմինին, շուտով կպատասխանեն։" if lang == 'hy' else "✅ Отправлено администратору, скоро ответят։"
+        bot.send_message(call.from_user.id, done)
+    except Exception:
+        pass
 
 
 # === FLASK WEB APP + WEBHOOK ===
@@ -1618,16 +1767,6 @@ def setup_webhook():
     time.sleep(1)
     bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member"])
     print(f"✅ Webhook-ը սահմանվեց՝ {WEBHOOK_URL}")
-    try:
-        bot.set_chat_menu_button(
-            menu_button=types.MenuButtonWebApp(
-                text="Անձնական կաբինետ",
-                web_app=types.WebAppInfo(url=CABINET_URL)
-            )
-        )
-        print(f"✅ Menu button (WebApp) սահմանվեց՝ {CABINET_URL}")
-    except Exception as e:
-        print(f"⚠️ Menu button-ը սահմանել չհաջողվեց: {e}")
 
 
 # Both of these run at module load time (i.e. also when gunicorn
