@@ -1,8 +1,11 @@
+import hashlib
+import hmac
+import json
 import os
 import random
 import time
 from io import BytesIO
-from urllib.parse import unquote
+from urllib.parse import unquote, parse_qsl
 
 import psycopg2
 import psycopg2.pool
@@ -42,6 +45,11 @@ SUPABASE_URL = os.environ.get(
 WEBHOOK_HOST = os.environ.get('RENDER_EXTERNAL_URL', 'https://your-app-name.onrender.com')
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
+
+# Անձնական կաբինետի WebApp-ի հասցեն. նույն Render domain-ը, ինչ webhook-ը,
+# այնպես որ ոչ մի արտաքին hosting (GitHub Pages) այլևս պետք չէ։
+CABINET_PATH = '/cabinet'
+CABINET_URL = WEBHOOK_HOST + CABINET_PATH
 
 STORE_LINKS = {
     'happ': {
@@ -1363,6 +1371,212 @@ def forward_to_admin(message):
         pass
 
 
+# === WEBAPP (Անձնական կաբինետ) ===
+
+def validate_init_data(init_data: str, max_age_seconds: int = 86400):
+    """Ստուգում է Telegram-ից եկած WebApp initData-ի ստորագրությունը (HMAC),
+    որպեսզի համոզվենք՝ խնդրանքն իրոք Telegram-ից է եկել, ոչ թե կեղծված։
+    Հաջողության դեպքում վերադարձնում է parsed user dict-ը, հակառակ դեպքում՝ None։"""
+    try:
+        parsed = dict(parse_qsl(init_data, strict_parsing=True))
+        received_hash = parsed.pop('hash', None)
+        if not received_hash:
+            return None
+        auth_date = int(parsed.get('auth_date', 0))
+        if max_age_seconds and (time.time() - auth_date) > max_age_seconds:
+            return None
+        data_check_string = '\n'.join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(computed_hash, received_hash):
+            return None
+        user = json.loads(parsed.get('user', '{}'))
+        return user
+    except Exception:
+        return None
+
+
+CABINET_HTML = """<!DOCTYPE html>
+<html lang="hy">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>VedaVPN | Անձնական կաբինետ</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700;800&family=Noto+Sans+Armenian:wght@400;600;700;800&display=swap');
+  :root{
+    --bg:#12102a; --bg2:#1a1740; --amber:#f5b544; --amber2:#ffd479;
+    --ink:#f3efe6; --sub:#b9b3d6; --card:#1f1b47; --line:rgba(245,181,68,.18);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Noto Sans','Noto Sans Armenian',sans-serif;
+    background:radial-gradient(circle at 50% -10%, #2a2360 0%, var(--bg) 60%);
+    color:var(--ink);min-height:100vh;padding:20px 16px 40px;}
+  .top{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:22px;}
+  .top .brand{letter-spacing:.3em;font-size:13px;color:var(--sub);text-transform:uppercase;}
+  .top h1{margin:6px 0 0;font-size:26px;font-weight:800;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:20px;
+    padding:18px;margin-bottom:14px;}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:10px;}
+  .label{color:var(--sub);font-size:13px;}
+  .value{font-weight:700;font-size:16px;}
+  .pill{display:inline-flex;align-items:center;gap:6px;background:#151233;
+    border:1px solid var(--line);border-radius:999px;padding:8px 14px;font-size:13px;}
+  .devbtn{color:var(--ink);cursor:pointer;font-family:inherit;}
+  .devbtn.active{background:linear-gradient(135deg,var(--amber),var(--amber2));
+    color:#1a1130;border-color:transparent;font-weight:700;}
+  .pills{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;}
+  .cta{display:block;width:100%;text-align:center;padding:16px;border-radius:16px;
+    font-weight:800;font-size:16px;text-decoration:none;border:none;cursor:pointer;
+    clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px);}
+  .cta-primary{background:linear-gradient(135deg,var(--amber),var(--amber2));color:#1a1130;margin-bottom:12px;}
+  .cta-secondary{background:transparent;border:1px solid var(--line);color:var(--ink);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;}
+  .mini{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;text-align:left;}
+  .mini .t{font-weight:700;font-size:14px;margin-bottom:4px;}
+  .mini .d{color:var(--sub);font-size:12px;}
+  .skeleton{opacity:.5;}
+  a{color:inherit;}
+</style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand">VedaVPN</div>
+    <h1 id="hello">Բարի գալուստ 👋</h1>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span class="label">Ձեր սարքը</span>
+    </div>
+    <div class="pills" style="margin-top:10px;">
+      <button class="pill devbtn" id="devAndroid" data-device="android">🤖 Android</button>
+      <button class="pill devbtn" id="devIos" data-device="ios">🍏 iPhone</button>
+      <span class="pill" id="refCount">👥 0 հրավեր</span>
+    </div>
+  </div>
+
+  <a class="cta cta-primary" id="connectBtn" href="#">⚡ Ներբեռնել հավելվածը</a>
+  <a class="cta cta-secondary" id="subLinkBtn" href="#">🔗 Բացել sub հղումը</a>
+  <a class="cta cta-secondary" id="inviteBtn" href="#">🎁 Հրավիրել ընկերոջ</a>
+
+  <div class="grid2">
+    <div class="mini" id="supportBtn">
+      <div class="t">🛠 Աջակցություն</div>
+      <div class="d">Հարց ունե՞ք</div>
+    </div>
+    <div class="mini" id="channelBtn">
+      <div class="t">📢 Մեր ալիքը</div>
+      <div class="d">Նորություններ</div>
+    </div>
+  </div>
+
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+  const initData = tg.initData || "";
+  let currentData = null;
+
+  const STORE_LINKS = {
+    android: "https://play.google.com/store/apps/details?id=llc.itdev.incy",
+    ios: "https://apps.apple.com/ru/app/incy/id6756943388"
+  };
+
+  function renderDevice(device) {
+    document.getElementById("devAndroid").classList.toggle("active", device === "android");
+    document.getElementById("devIos").classList.toggle("active", device === "ios");
+    document.getElementById("connectBtn").href = STORE_LINKS[device];
+  }
+
+  async function load() {
+    try {
+      const res = await fetch("/api/cabinet?" + new URLSearchParams({init_data: initData}));
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "error");
+      currentData = data;
+
+      document.getElementById("hello").textContent = "Բարի գալուստ, " + data.first_name + " 👋";
+      document.getElementById("subLinkBtn").href = data.sub_url;
+      document.getElementById("refCount").textContent = "👥 " + data.ref_count + " հրավեր";
+      document.getElementById("inviteBtn").href = data.invite_url;
+      document.getElementById("supportBtn").onclick = () => tg.openTelegramLink(data.support_url);
+      document.getElementById("channelBtn").onclick = () => tg.openTelegramLink(data.channel_url);
+      renderDevice(data.device === "ios" ? "ios" : "android");
+    } catch (e) {
+      document.getElementById("hello").textContent = "Չհաջողվեց բեռնել տվյալները";
+    }
+  }
+
+  async function setDevice(device) {
+    renderDevice(device);
+    try {
+      await fetch("/api/cabinet/device", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({init_data: initData, device: device})
+      });
+      tg.HapticFeedback.impactOccurred("light");
+    } catch (e) { /* ignore */ }
+  }
+
+  document.getElementById("devAndroid").onclick = () => setDevice("android");
+  document.getElementById("devIos").onclick = () => setDevice("ios");
+
+  load();
+</script>
+</body>
+</html>"""
+
+
+@app.route(CABINET_PATH, methods=['GET'])
+def cabinet_page():
+    return CABINET_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@app.route('/api/cabinet', methods=['GET'])
+def cabinet_api():
+    init_data = request.args.get('init_data', '')
+    user = validate_init_data(init_data)
+    if not user:
+        return {'ok': False, 'error': 'invalid_init_data'}, 401
+
+    user_id = user.get('id')
+    row = db_execute(
+        "SELECT lang, ref_count, device FROM users WHERE user_id = %s",
+        (user_id,), fetchone=True
+    )
+    lang, ref_count, device = (row if row else ('ru', 0, 'android'))
+
+    return {
+        'ok': True,
+        'first_name': user.get('first_name', ''),
+        'lang': lang,
+        'ref_count': ref_count or 0,
+        'device': device or 'android',
+        'sub_url': WEBHOOK_HOST + '/sub',
+        'invite_url': f"https://t.me/vedavpn_bot?start={user_id}",
+        'support_url': f"https://t.me/{CHANNEL.replace('@', '')}",
+        'channel_url': f"https://t.me/{CHANNEL.replace('@', '')}",
+    }, 200
+
+
+@app.route('/api/cabinet/device', methods=['POST'])
+def cabinet_set_device():
+    payload = request.get_json(silent=True) or {}
+    user = validate_init_data(payload.get('init_data', ''))
+    if not user:
+        return {'ok': False, 'error': 'invalid_init_data'}, 401
+
+    device = payload.get('device')
+    if device not in ('android', 'ios'):
+        return {'ok': False, 'error': 'invalid_device'}, 400
+
+    set_device(user.get('id'), device)
+    return {'ok': True}, 200
+
+
 # === FLASK WEB APP + WEBHOOK ===
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
@@ -1404,6 +1618,16 @@ def setup_webhook():
     time.sleep(1)
     bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member"])
     print(f"✅ Webhook-ը սահմանվեց՝ {WEBHOOK_URL}")
+    try:
+        bot.set_chat_menu_button(
+            menu_button=types.MenuButtonWebApp(
+                text="Անձնական կաբինետ",
+                web_app=types.WebAppInfo(url=CABINET_URL)
+            )
+        )
+        print(f"✅ Menu button (WebApp) սահմանվեց՝ {CABINET_URL}")
+    except Exception as e:
+        print(f"⚠️ Menu button-ը սահմանել չհաջողվեց: {e}")
 
 
 # Both of these run at module load time (i.e. also when gunicorn
