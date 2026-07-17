@@ -56,28 +56,6 @@ STORE_LINKS = {
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
 
-# --- Պաշտպանել բոտի ուղարկած հաղորդագրությունները переслать/պատճենումից ---
-# Բոլոր send_message / send_photo կանչերը (բացի ադմինի հետ զրույցից)
-# ավտոմատ ստանում են protect_content=True, որպեսզի օգտատերը չկարողանա
-# ոչ переслать անել, ոչ պատճենել (copy) բոտի ուղարկած տեքստը/նկարը/QR-ը։
-_orig_send_message = bot.send_message
-_orig_send_photo = bot.send_photo
-
-
-def _protected_send_message(chat_id, *args, **kwargs):
-    if int(chat_id) != ADMIN_ID:
-        kwargs.setdefault('protect_content', True)
-    return _orig_send_message(chat_id, *args, **kwargs)
-
-
-def _protected_send_photo(chat_id, *args, **kwargs):
-    if int(chat_id) != ADMIN_ID:
-        kwargs.setdefault('protect_content', True)
-    return _orig_send_photo(chat_id, *args, **kwargs)
-
-
-bot.send_message = _protected_send_message
-bot.send_photo = _protected_send_photo
 app = Flask(__name__)
 
 
@@ -474,6 +452,18 @@ def show_typing(chat_id):
         pass
 
 
+def hide_main_menu(chat_id):
+    """Փակում է ներքևի գլխավոր մենյուն (ReplyKeyboard), որ inline «🏠 Գլխավոր մենյու»-ն իմաստ ունենա։"""
+    try:
+        msg = bot.send_message(chat_id, "⌨️", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        return
+    try:
+        bot.delete_message(chat_id, msg.message_id)
+    except Exception:
+        pass
+
+
 def build_nav_markup(lang, back_callback=None, extra_rows=None):
     """Միասնական navigation՝ ընտրովի «⬅️ Հետ» + միշտ «🏠 Գլխավոր մենյու»։"""
     markup = types.InlineKeyboardMarkup()
@@ -512,6 +502,7 @@ def send_vpn_link(chat_id, lang):
     caption = get_content('text_vpn_caption', lang).format(link=link)
     qr_bio = generate_qr(link)
     show_typing(chat_id)
+    hide_main_menu(chat_id)
     bot.send_photo(
         chat_id, qr_bio, caption=caption,
         reply_markup=build_app_markup(chat_id, lang),
@@ -687,6 +678,7 @@ def check_sub_callback(call):
 def howto(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     bot.send_message(message.chat.id, get_content('text_howto', lang), reply_markup=build_nav_markup(lang))
 
 
@@ -695,6 +687,7 @@ def howto(message):
 def faq(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     bot.send_message(message.chat.id, get_content('text_faq', lang), reply_markup=build_nav_markup(lang))
 
 
@@ -780,6 +773,7 @@ def show_refs(message):
     else:
         text = f"👥 Ваших рефералов: {count}\n🔗 Ссылка: https://t.me/vedavpn_bot?start={message.chat.id}"
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     ref_link = f"https://t.me/vedavpn_bot?start={message.chat.id}"
     if lang == 'hy':
         share_text = "🛡 Անվճար VPN VedaVPN-ից՝ միացիր իմ հղումով 👇"
@@ -842,6 +836,7 @@ def ref_leaderboard(call):
 def forum(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     btn_text = "🔗 Ֆորում" if lang == 'hy' else "🔗 Форум"
     msg_text = "💬 Մեր ֆորումը՝" if lang == 'hy' else "💬 Наш форум:"
     forum_btn = types.InlineKeyboardButton(btn_text, url=get_config('forum_link'))
@@ -853,6 +848,7 @@ def forum(message):
 def iptv(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     link = get_config('iptv_link')
     if not link:
         bot.send_message(message.chat.id, get_content('text_iptv_missing', lang), reply_markup=build_nav_markup(lang))
@@ -869,6 +865,7 @@ def iptv(message):
 def support(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     bot.send_message(message.chat.id, get_content('text_support_prompt', lang), reply_markup=build_nav_markup(lang))
 
 
@@ -877,6 +874,7 @@ def support(message):
 def info_menu(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
     bot.send_message(message.chat.id, get_content('text_info_prompt', lang), reply_markup=build_info_markup(lang))
 
 
@@ -941,7 +939,7 @@ def admin_panel(message):
         f"/stats — մանրամասն վիճակագրություն 📊\n"
         f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
         f"/reply ID տեքստ — պատասխանել user-ի\n"
-        f"/listkeys — ցույց տալ բոլոր editable content key-ները\n"
+        f"/listkeys — ��ույց տալ բոլոր editable content key-ները\n"
         f"/getcontent key — ցույց տալ key-ի ընթացիկ hy/ru արժեքները\n"
         f"/setcontent key lang տեքստ — փոխել կոճակի/տեքստի արժեքը\n"
         f"/getconfig — ցույց տալ VPN/forum հղումները\n"
@@ -1251,7 +1249,7 @@ def add_button_cmd(message):
             "❌ Ֆորմատ (առանց hy_/ru_ prefix-ների, պարզապես 4 մաս | -ով).\n"
             "<code>/addbutton [կոճակի անունը հայերեն]|[կոճակի անունը ռուսերեն]|[պատասխանը հայերեն]|[պատասխանը ռուսերեն]</code>\n\n"
             "Օրինակ.\n"
-            "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրային WiFi-ում առանց...|Никогда не используйте VPN в публичном WiFi без...</code>"
+            "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրային WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
         )
         return
 
@@ -1605,13 +1603,13 @@ FAQ_SEARCH = [
         'keywords': ['ինչպես տեղադր', 'ինչպես ավելացն', 'ինչպես միացն', 'տեղադր', 'կարգավոր', 'ինստալ',
                      'как установ', 'как добав', 'как подключ', 'как настро', 'установить', 'инструкц'],
         'hy': "📖 Տեղադրման քայլ առ քայլ ցուցումների համար սեղմիր «📖 Ինչպես տեղադրել» կոճակը menu-ից։",
-        'ru': "📖 Пошаговая инструкция по установке — нажмите кнопку «📖 Как установить» в меню։",
+        'ru': "📖 Пошаговая инс��рукция по установке — нажмите кнопку «📖 Как установить» в меню։",
     },
     {
         'keywords': ['վճար', 'գին', 'արժ', 'ինչքան', 'փող', 'անվճար',
                      'платн', 'цен', 'стоит', 'сколько', 'деньг', 'бесплатн', 'о��лат'],
         'hy': "💰 VPN-ը ներկայումս ամբողջությամբ անվճար է մեր ալիքի բաժանորդների համար։",
-        'ru': "💰 VPN сейчас полностью бесплатный для подписчиков нашего канала։",
+        'ru': "💰 VPN сейчас п��лностью бесплатный для подписчиков нашего канала։",
     },
     {
         'keywords': ['հղում', 'ստանալ vpn', 'որտեղ vpn', 'sub', 'подписк', 'ссылк', 'получить vpn', 'где vpn'],
