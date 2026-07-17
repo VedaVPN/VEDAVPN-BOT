@@ -506,13 +506,9 @@ def send_vpn_link(chat_id, lang):
     bot.send_photo(
         chat_id, qr_bio, caption=caption,
         reply_markup=build_app_markup(chat_id, lang),
-        protect_content=True,
     )
     done = "✅ Պատ��աստ է՝ քո VPN հղումը վերևում է։" if lang == 'hy' else "✅ Готово — ваша VPN-ссылка выше։"
     bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
-    safe_link = link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    copy_hint = "🔗 Հղումը (սեղմիր՝ պատճենելու համար)՝" if lang == 'hy' else "🔗 Ссылка (нажми, чтобы скопировать):"
-    bot.send_message(chat_id, "{}\n<code>{}</code>".format(copy_hint, safe_link))
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("device_android", "device_ios"))
