@@ -508,8 +508,11 @@ def send_vpn_link(chat_id, lang):
         reply_markup=build_app_markup(chat_id, lang),
         protect_content=True,
     )
-    done = "✅ Պատրաստ է՝ քո VPN հղումը վերևում է։" if lang == 'hy' else "✅ Готово — ваша VPN-ссылка выше։"
+    done = "✅ Պատ��աստ է՝ քո VPN հղումը վերևում է։" if lang == 'hy' else "✅ Готово — ваша VPN-ссылка выше։"
     bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
+    safe_link = link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    copy_hint = "🔗 Հղումը (սեղմիր՝ պատճենելու համար)՝" if lang == 'hy' else "🔗 Ссылка (нажми, чтобы скопировать):"
+    bot.send_message(chat_id, "{}\n<code>{}</code>".format(copy_hint, safe_link))
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("device_android", "device_ios"))
@@ -1249,7 +1252,7 @@ def add_button_cmd(message):
             "❌ Ֆորմատ (առանց hy_/ru_ prefix-ների, պարզապես 4 մաս | -ով).\n"
             "<code>/addbutton [կոճակի անունը հայերեն]|[կոճակի անունը ռուսերեն]|[պատասխանը հայերեն]|[պատասխանը ռուսերեն]</code>\n\n"
             "Օրինակ.\n"
-            "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրային WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
+            "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրա��ին WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
         )
         return
 
@@ -1614,7 +1617,7 @@ FAQ_SEARCH = [
     {
         'keywords': ['հղում', 'ստանալ vpn', 'որտեղ vpn', 'sub', 'подписк', 'ссылк', 'получить vpn', 'где vpn'],
         'hy': "🔗 VPN հղումը ստանալու համար սեղմիր «🛡 Ստանալ VPN» կոճակը, բաժանորդագրվիր ալիքին, "
-              "և հղումը կուղարկվի ավտոմատ։",
+              "և հղումը կո��ղարկվի ավտոմատ։",
         'ru': "🔗 Чтобы получить VPN-ссылку, нажмите «🛡 Получить VPN», подпишитесь на канал — "
               "ссылка придёт автоматически։",
     },
