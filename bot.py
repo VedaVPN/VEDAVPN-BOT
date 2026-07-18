@@ -1,6 +1,12 @@
+import csv
+import hashlib
+import logging
 import os
 import random
+import secrets
+import threading
 import time
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from urllib.parse import unquote, quote
 
@@ -9,8 +15,12 @@ import psycopg2.pool
 import qrcode
 import telebot
 from telebot import types
+from telebot.apihelper import ApiTelegramException
 from flask import Flask, request, abort
 from github import Github
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("vedavpn")
 
 TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID'))
@@ -43,6 +53,11 @@ WEBHOOK_HOST = os.environ.get('RENDER_EXTERNAL_URL', 'https://your-app-name.onre
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 
+# Գաղտնի token՝ webhook-ի իսկությունը ստուգելու համար։ Telegram-ը այն ուղարկում է
+# X-Telegram-Bot-Api-Secret-Token header-ով։ Կարելի է սահմանել WEBHOOK_SECRET env-ով,
+# հակառակ դեպքում ավտոմատ ստացվում է BOT_TOKEN-ից։
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET') or hashlib.sha256(f"vedavpn:{TOKEN or ''}".encode()).hexdigest()[:48]
+
 STORE_LINKS = {
     'happ': {
         'android': 'https://play.google.com/store/apps/details?id=com.happproxy',
@@ -72,14 +87,18 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
     conn = db_pool.getconn()
     try:
         cur = conn.cursor()
-        cur.execute(query, params)
-        if commit:
-            conn.commit()
-        if fetchone:
-            return cur.fetchone()
-        if fetchall:
-            return cur.fetchall()
-        return None
+        try:
+            cur.execute(query, params)
+            result = None
+            if fetchone:
+                result = cur.fetchone()
+            elif fetchall:
+                result = cur.fetchall()
+            if commit:
+                conn.commit()
+            return result
+        finally:
+            cur.close()
     except Exception:
         conn.rollback()
         raise
@@ -99,6 +118,24 @@ def init_db():
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS device TEXT", commit=True)
     # Գրանցման ամսաթիվ՝ «նոր օգտատերեր այսօր/շաբաթ» վիճակագրության համար
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()", commit=True)
+    # Անհատական sub հղումների սյուներ՝ token, ban, օգտագործման հաշվիչ
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_token TEXT", commit=True)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT FALSE", commit=True)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_fetches BIGINT DEFAULT 0", commit=True)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_sub_at TIMESTAMP", commit=True)
+    db_execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_sub_token ON users (sub_token)", commit=True)
+    # Վերջին ակտիվության պահը՝ ավտոմատ ողջույնի համար
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP", commit=True)
+    # Օգտատիրոջ հերթական համարը («Դու №N օգտատերն ես»)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS member_no BIGINT", commit=True)
+    # Ծննդյան օր (DD.MM) և վերջին շնորհավորած տարին
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS birthday TEXT", commit=True)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bday_greeted_year INTEGER", commit=True)
+    # Ռեֆերալների գրանցամատյան՝ «Ամսվա չեմպիոն»-ի համար
+    db_execute('''CREATE TABLE IF NOT EXISTS referral_log
+                (id BIGSERIAL PRIMARY KEY,
+                 referrer_id BIGINT,
+                 ts TIMESTAMP DEFAULT now())''', commit=True)
     # Bilingual texts (buttons, FAQ, howto, etc.)
     db_execute('''CREATE TABLE IF NOT EXISTS content
                 (key TEXT, lang TEXT, value TEXT, PRIMARY KEY (key, lang))''', commit=True)
@@ -110,6 +147,34 @@ def init_db():
                 (id SERIAL PRIMARY KEY,
                  label_hy TEXT, label_ru TEXT,
                  response_hy TEXT, response_ru TEXT)''', commit=True)
+    # Captcha-ի և support-ի ժամանակավոր state-ը պահվում է DB-ում (ոչ in-memory),
+    # որպեսզի gunicorn-ի մի քանի worker-ների դեպքում էլ ճիշտ աշխատի։
+    db_execute('''CREATE TABLE IF NOT EXISTS pending_captcha
+                (user_id BIGINT PRIMARY KEY,
+                 answer INTEGER,
+                 ref_id BIGINT DEFAULT 0,
+                 ts DOUBLE PRECISION)''', commit=True)
+    db_execute('''CREATE TABLE IF NOT EXISTS pending_support
+                (user_id BIGINT PRIMARY KEY,
+                 from_user_id BIGINT,
+                 username TEXT,
+                 chat_id BIGINT,
+                 message_id BIGINT,
+                 ts DOUBLE PRECISION)''', commit=True)
+    # ⭐ Օգտատերերի գնահատականներն ու մեկնաբանությունները (1 գնահատական՝ 1 օգտատեր)
+    db_execute('''CREATE TABLE IF NOT EXISTS feedback
+                (user_id BIGINT PRIMARY KEY,
+                 rating INTEGER,
+                 comment TEXT,
+                 updated_at TIMESTAMP DEFAULT now())''', commit=True)
+    # Օգտատիրոջ անունը՝ հրապարակային կարծիքների ցուցակի համար
+    db_execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS name TEXT", commit=True)
+    # Ադմինի պատասխանը կարծիքին (/freply)
+    db_execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS reply TEXT", commit=True)
+    # Մեկնաբանության սպասման state-ը՝ DB-ում (gunicorn worker-ների համար անվտանգ)
+    db_execute('''CREATE TABLE IF NOT EXISTS pending_feedback
+                (user_id BIGINT PRIMARY KEY,
+                 ts DOUBLE PRECISION)''', commit=True)
 
 
 # === CONTENT (bilingual texts, editable by the admin) ===
@@ -132,15 +197,15 @@ CONTENT_DEFAULTS = {
         'ru': "🌍 Ընտրեք լեզուն / Выберите язык:",
     },
     'text_subscribe_warn': {
-        'hy': "⚠️ Խնդրում ենք բաժանորդագրվել ալիքին և սեղմել ստուգելու կոճակը:",
-        'ru': "⚠️ Пожалуйста, подпишитесь на канал и нажмите кнопку проверки:",
+        'hy': "⚠️ Խնդր��ւմ ենք բաժանորդագրվել ալիքին և սեղմել ստուգելու կոճակը:",
+        'ru': "⚠️ Пожалуйста, подпишитесь на канал и нажмите кнопку провер��и:",
     },
     'text_not_subscribed': {
         'hy': "❌ Դուք դեռ բաժանորդագրված չեք:",
         'ru': "❌ Вы еще не подписались:",
     },
     'text_vpn_caption': {
-        'hy': "🔗 <b>VPN հղում:</b>\n<code>{link}</code>\n\nℹ️ Չգիտե՞ք որտեղ տեղադրել այս հղումը։ Սեղմեք «📖 Ինչպես տեղադրել» կոճակը menu-ից։",
+        'hy': "🔗 <b>VPN հղում:</b>\n<code>{link}</code>\n\nℹ️ Չգիտե����ք որտեղ տեղադրել այս հղումը։ Սեղմեք «📖 Ինչպես տեղադրել» կոճակը menu-ից։",
         'ru': "🔗 <b>Ссылка на VPN:</b>\n<code>{link}</code>\n\nℹ️ Не знаете куда вставить эту ссылку? Нажмите «📖 Как установить» в меню.",
     },
     'text_howto': {
@@ -218,11 +283,11 @@ CONTENT_DEFAULTS = {
             "📄 <b>Օգտագործման պայմաններ</b>\n\n"
             "Այս Telegram բոտն ու դրանով տրամադրվող VedaVPN ծառայությունը օգտագործելով՝ դուք համաձայնվում եք հետևյալ պայմաններին։\n\n"
             "<b>1. Ծառայության նկարագրություն</b>\n"
-            "VedaVPN-ը անվճար VPN և IPTV հասանելիություն է տրամադրում մեր Telegram ալիքի բաժանորդներին՝ որպես bonus։ Ծառայությունը կարող է փոփոխվել, սահմանափակվել կամ դադարեցվել ցանկացած պահի, առանց նախնական ծանուցման։\n\n"
+            "VedaVPN-ը անվճար VPN և IPTV հասանելի��ւթյուն է տրամադրում մեր Telegram ալիքի բաժանորդներին՝ որպես bonus։ Ծառայությունը կարող է փոփոխվել, սահմանափակվել կամ ��ադարեցվել ցանկացած պահի, առանց նախնական ծանուցման։\n\n"
             "<b>2. Օգտվելու պայման</b>\n"
             "VPN հղումը ակտիվ մնալու համար անհրաժեշտ է մնալ բաժանորդագրված մեր ալիքին։ Ալիքից դուրս գալու դեպքում հասանելիությունը կարող է սահմանափակվել։\n\n"
             "<b>3. Թույլատրելի օգտագործում</b>\n"
-            "Արգելվում է ծառայությունն օգտագործել ապօրինի գործունեության, երրորդ անձանց իրավունքների խախտման կամ վնասակար նպատակներով։\n\n"
+            "Արգելվում է ծառայությունն օգտագործել ապօրինի գործունեության, երրորդ անձան������ իրավունքների խախտման կամ վնասակար նպատակներով։\n\n"
             "<b>4. Երաշխիքի բացակայություն</b>\n"
             "Ծառայությունը տրամադրվում է «ինչպես կա» սկզբունքով, առանց արագության, անընդհատության կամ որակի երաշխիքի։ Մենք պատասխանատվություն չենք կրում հնարավոր ընդհատումների, տվյալների կորստի կամ վնասների համար։\n\n"
             "<b>5. Փոփոխություններ</b>\n"
@@ -274,7 +339,7 @@ CONTENT_DEFAULTS = {
             "• Реферальные данные (кого вы пригласили / кем приглашены)\n"
             "• Сообщения, отправленные боту (например, запросы в поддержку)\n\n"
             "<b>2. Для чего мы их используем</b>\n"
-            "Эти данные используются исключительно для работы сервиса: проверки подписки на канал, ответа на нужном языке со ссылкой, подсчёта рефералов и обработки обращений в поддержку. Сообщения, отправленные в поддержку, пересылаются администратору вместе с вашим ID и ссылкой на профиль.\n\n"
+            "Эти данные используются исключительн�� для работы сервиса: проверки подписки на канал, ответа на нужном языке со ссылкой, подсчёта рефералов и обработки обращений в поддержку. Сообщения, отправленные в поддержку, пересылаются администратору вместе с вашим ID и ссылкой на профиль.\n\n"
             "<b>3. Что мы НЕ собираем</b>\n"
             "Сам бот не собирает и не хранит данные о вашей интернет-активности/трафике. Работа VPN-сервера обеспечивается отдельной инфраструктурой.\n\n"
             "<b>4. Хранение и передача данных</b>\n"
@@ -339,12 +404,140 @@ CONTENT_DEFAULTS = {
     'btn_store_apple':    {'hy': "⬇️ App Store", 'ru': "⬇️ App Store"},
 }
 
+# === ENGLISH CONTENT ===
+# Անգլերեն տեքստերը առանձին dict-ում են, ապա merge են արվում CONTENT_DEFAULTS-ի մեջ։
+CONTENT_EN = {
+    'btn_get_vpn':   "🛡 Get VPN",
+    'btn_referrals': "👥 Referrals",
+    'btn_howto':     "📖 How to install",
+    'btn_faq':       "❓ FAQ",
+    'btn_support':   "🆘 Support",
+    'btn_forum':     "💬 Forum",
+    'btn_iptv':      "📺 IPTV",
+    'btn_info':      "📜 Terms & Privacy",
+    'btn_terms':     "📄 Terms of Use",
+    'btn_privacy':   "🔒 Privacy Policy",
+    'btn_back':      "⬅️ Back",
+    'btn_main_menu': "🏠 Main menu",
+    'text_choose_lang': "🌍 Ընտրեք լեզուն / Выберите язык / Choose language:",
+    'text_subscribe_warn': "⚠️ Please subscribe to the channel and press the check button:",
+    'text_not_subscribed': "❌ You are not subscribed yet:",
+    'text_vpn_caption': "🔗 <b>Your VPN link:</b>\n<code>{link}</code>\n\nℹ️ Not sure where to paste this link? Tap «📖 How to install» in the menu.",
+    'text_howto': (
+        "📖 <b>How to add the VPN link</b>\n\n"
+        "1️⃣ First copy the VPN link by tapping it in the bot message\n\n"
+        "<b>📱 In the Happ app:</b>\n"
+        "• Open Happ\n"
+        "• Tap the «+» button in the top right\n"
+        "• Choose «Add from Clipboard» or «Import from URL»\n"
+        "• Confirm (the link is already copied)\n"
+        "• Pick a server from the list and tap Connect\n\n"
+        "<b>📱 In the INCY app:</b>\n"
+        "• Open INCY\n"
+        "• Tap «+»\n"
+        "• Choose «Paste from Clipboard» or «Add Subscription»\n"
+        "• Confirm the link\n"
+        "• Pick a server and connect"
+    ),
+    'text_faq': (
+        "❓ <b>Frequently Asked Questions</b>\n\n"
+        "<b>1. How do I get the VPN link?</b>\n"
+        "Tap «🛡 Get VPN» and subscribe to the channel — the link is sent automatically.\n\n"
+        "<b>2. Why do I need to subscribe to the channel?</b>\n"
+        "The VPN is provided to channel subscribers for free as a bonus.\n\n"
+        "<b>3. Is the VPN paid?</b>\n"
+        "No — it is completely free.\n\n"
+        "<b>4. How do I add the link to the app?</b>\n"
+        "Tap «📖 How to install» in the menu for step-by-step instructions.\n\n"
+        "<b>5. The VPN is not working, what should I do?</b>\n"
+        "Try picking another server in the app. If that doesn't help, contact «🆘 Support».\n\n"
+        "<b>6. How do I get more bonuses?</b>\n"
+        "Invite friends with your referral link (see «👥 Referrals»)."
+    ),
+    'text_info_prompt': "📜 Choose:",
+    'text_terms': (
+        "📄 <b>Terms of Use</b>\n\n"
+        "By using this Telegram bot and the VedaVPN service you agree to the following terms.\n\n"
+        "<b>1. Service description</b>\n"
+        "VedaVPN provides free VPN and IPTV access to subscribers of our Telegram channel as a bonus. The service may be changed, limited, or discontinued at any time without prior notice.\n\n"
+        "<b>2. Usage requirement</b>\n"
+        "To keep your VPN link active you must stay subscribed to our channel. If you unsubscribe, access may be restricted.\n\n"
+        "<b>3. Acceptable use</b>\n"
+        "Using the service for illegal activity, violating third-party rights, or any harmful purposes is prohibited.\n\n"
+        "<b>4. No warranty</b>\n"
+        "The service is provided «as is», with no guarantees of speed, availability, or quality. We are not liable for possible interruptions, data loss, or damages.\n\n"
+        "<b>5. Changes</b>\n"
+        "These terms may be updated from time to time. Continued use of the service means you accept the updated terms.\n\n"
+        "<b>6. Contact</b>\n"
+        "For any questions use the «🆘 Support» button."
+    ),
+    'text_privacy': (
+        "🔒 <b>Privacy Policy</b>\n\n"
+        "<b>1. What data we collect</b>\n"
+        "• Your Telegram ID and username (if any)\n"
+        "• Chosen language and device type (Android/iPhone)\n"
+        "• Referral data (who you invited / who invited you)\n"
+        "• Messages sent to the bot (e.g. support requests)\n\n"
+        "<b>2. How we use it</b>\n"
+        "This data is used solely to run the service: checking channel subscription, replying in the right language with your link, counting referrals, and handling support requests. Support messages are forwarded to the administrator together with your ID and profile link.\n\n"
+        "<b>3. What we do NOT collect</b>\n"
+        "The bot itself does not collect or store your browsing/traffic data. The VPN servers are run on separate infrastructure.\n\n"
+        "<b>4. Storage and sharing</b>\n"
+        "Data is stored in a secure database for as long as you use the service. We do not sell or share your data with third parties, except where required by law.\n\n"
+        "<b>5. Your rights</b>\n"
+        "You can ask at any time what data we store about you, or request its deletion, via the «🆘 Support» button.\n\n"
+        "<b>6. Changes</b>\n"
+        "This policy may be updated. Continued use of the service after changes means you agree to them."
+    ),
+    'text_support_prompt': "📩 Write your question:",
+    'text_welcome': "👋 Welcome to VedaVPN! Free and secure VPN for our channel subscribers.",
+    'text_iptv_caption': "📺 <b>IPTV link:</b>\n<code>{link}</code>",
+    'text_iptv_missing': "❌ IPTV link is not set yet.",
+    'text_iptv_instructions': (
+        "\n\nℹ️ <b>How to connect:</b>\n"
+        "1️⃣ Copy the link above\n"
+        "2️⃣ Open your IPTV app (e.g. IPTV Smarters, TiviMate)\n"
+        "3️⃣ Choose «Add Playlist�� / «Add from URL»\n"
+        "4️⃣ Paste the link and confirm\n"
+        "5️⃣ Wait for the channels to load and enjoy"
+    ),
+    'text_unsub_warning': (
+        "⚠️ <b>You left the channel</b>\n\n"
+        "The VPN is available only to subscribers of our channel. "
+        "If you want to keep using the VPN, please subscribe again."
+    ),
+    'btn_device_android': "🤖 Android",
+    'btn_device_ios':     "🍏 iPhone",
+    'btn_open_happ':      "🚀 Open in Happ",
+    'btn_open_incy':      "🚀 Open in INCY",
+    'btn_store_google':   "⬇️ Google Play",
+    'btn_store_apple':    "⬇️ App Store",
+}
+
+for _key, _value in CONTENT_EN.items():
+    CONTENT_DEFAULTS.setdefault(_key, {})['en'] = _value
+
 
 def get_content(key, lang):
     row = db_execute("SELECT value FROM content WHERE key = %s AND lang = %s", (key, lang), fetchone=True)
     if row:
         return row[0]
-    return CONTENT_DEFAULTS.get(key, {}).get(lang, f"[{key}/{lang}]")
+    entry = CONTENT_DEFAULTS.get(key, {})
+    return entry.get(lang) or entry.get('ru') or f"[{key}/{lang}]"
+
+
+def tr(lang, hy, ru, en=None):
+    """Կարճ helper՝ երեք լեզվով inline տեքստերի համար (en-ի բացակայության դեպքում՝ ru)։"""
+    if lang == 'hy':
+        return hy
+    if lang == 'en' and en is not None:
+        return en
+    return ru
+
+
+def is_menu_btn(text, key):
+    """Ստուգում է՝ տեքստը մենյուի կոճակ է որևէ լեզվով։"""
+    return text in (get_content(key, 'hy'), get_content(key, 'ru'), get_content(key, 'en'))
 
 
 def set_content(key, lang, value):
@@ -386,6 +579,30 @@ def check_sub(user_id):
         return False
 
 
+def get_or_create_sub_token(user_id):
+    """Վերադարձնում է օգտատիրոջ անհատական sub token-ը, անհրաժեշտության դեպքում ստեղծում է։"""
+    row = db_execute("SELECT sub_token FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    if row and row[0]:
+        return row[0]
+    if not row:
+        return None
+    token = secrets.token_urlsafe(12)
+    db_execute(
+        "UPDATE users SET sub_token = %s WHERE user_id = %s AND sub_token IS NULL",
+        (token, user_id), commit=True
+    )
+    row = db_execute("SELECT sub_token FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    return row[0] if row and row[0] else None
+
+
+def get_personal_sub_link(user_id):
+    """Անհատական sub հղում. եթե token ��կա, fallback՝ ընդհանուր հղումը։"""
+    token = get_or_create_sub_token(user_id)
+    if token:
+        return f"{WEBHOOK_HOST}/sub/{token}"
+    return get_config('vpn_link')
+
+
 def get_lang(user_id):
     row = db_execute("SELECT lang FROM users WHERE user_id = %s", (user_id,), fetchone=True)
     return row[0] if row else 'ru'
@@ -412,6 +629,110 @@ def get_main_menu(lang):
         markup.add(label_hy if lang == 'hy' else label_ru)
 
     return markup
+
+
+# === «Քարտային» դիզայն և inline գլխավոր մենյու ===
+SEP = "▬▬▬▬▬▬▬▬▬▬▬▬"
+
+
+def card(title, body):
+    """Միասնական «քարտային» ոճ բոլոր բաժինների համար։"""
+    return f"🛡 <b>VedaVPN</b> │ <b>{title}</b>\n{SEP}\n\n{body}"
+
+
+def edit_or_send(chat_id, message_id, text, markup):
+    """In-place նավիգացիա. խմբագրում է նույն հաղորդագրությունը, fallback՝ նոր հաղորդագրություն։"""
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
+                                  reply_markup=markup, disable_web_page_preview=True)
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=markup, disable_web_page_preview=True)
+
+
+def build_main_menu_inline(lang):
+    """Գլխավոր մենյուն որպես inline ստեղնաշար՝ 2 սյունակով։"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton(get_content('btn_get_vpn', lang), callback_data="menu_vpn"),
+        types.InlineKeyboardButton(get_content('btn_referrals', lang), callback_data="menu_refs"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(get_content('btn_howto', lang), callback_data="menu_howto"),
+        types.InlineKeyboardButton(get_content('btn_faq', lang), callback_data="menu_faq"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(get_content('btn_support', lang), callback_data="menu_support"),
+        types.InlineKeyboardButton(get_content('btn_forum', lang), callback_data="menu_forum"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(get_content('btn_iptv', lang), callback_data="menu_iptv"),
+        types.InlineKeyboardButton(get_content('btn_info', lang), callback_data="menu_info"),
+    )
+    custom = db_execute("SELECT id, label_hy, label_ru FROM custom_buttons", fetchall=True) or []
+    for btn_id, label_hy, label_ru in custom:
+        markup.add(types.InlineKeyboardButton(label_hy if lang == 'hy' else label_ru,
+                                              callback_data=f"menu_cbtn_{btn_id}"))
+    markup.add(types.InlineKeyboardButton(
+        tr(lang, "⭐ Գնահատիր բոտը", "⭐ Оцени бота", "⭐ Rate the bot"),
+        callback_data="menu_rate"))
+    return markup
+
+
+def trust_line(lang):
+    """🤝 «Մեզ վստահում է X մարդ» + միջին գնահատական՝ գլխավոր մենյուի քարտի համար։"""
+    try:
+        row = db_execute("SELECT COUNT(*) FROM users", fetchone=True)
+        total = row[0] if row else 0
+    except Exception:
+        total = 0
+    if not total:
+        return ""
+    line = tr(lang,
+              f"🤝 Մեզ վստահում է <b>{total}</b> մարդ",
+              f"🤝 Нам доверяют <b>{total}</b> человек",
+              f"🤝 Trusted by <b>{total}</b> people")
+    try:
+        stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
+        if stats and stats[0]:
+            avg = float(stats[1] or 0)
+            line += f" • 🌟 {avg:.1f}/5"
+    except Exception:
+        pass
+    return line + "\n\n"
+
+
+def get_member_no(user_id):
+    """Օգտատիրոջ հերթական համարը՝ «Դու №N օգտատերն ես»։ Հաշվվում է մեկ անգամ և պահպանվում։"""
+    row = db_execute("SELECT member_no FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    if not row:
+        return None
+    if row[0]:
+        return row[0]
+    rank_row = db_execute(
+        "SELECT COUNT(*) FROM users WHERE (created_at, user_id) <= "
+        "(SELECT created_at, user_id FROM users WHERE user_id = %s)",
+        (user_id,), fetchone=True)
+    no = rank_row[0] if rank_row else None
+    if no:
+        db_execute("UPDATE users SET member_no = %s WHERE user_id = %s", (no, user_id), commit=True)
+    return no
+
+
+def send_main_menu(chat_id, lang, message_id=None):
+    """Գլխավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
+    hello = tr(lang, "Ընտրիր բաժինը 👇", "Выбери раздел 👇", "Choose a section 👇")
+    no = get_member_no(chat_id)
+    no_line = ""
+    if no:
+        no_line = tr(lang,
+                     f"🔢 Դու №{no} օգտատերն ես",
+                     f"🔢 Ты пользователь №{no}",
+                     f"🔢 You are user #{no}") + "\n\n"
+    text = f"🛡 <b>VedaVPN</b>\n{SEP}\n\n{trust_line(lang)}{no_line}{hello}"
+    edit_or_send(chat_id, message_id, text, build_main_menu_inline(lang))
 
 
 def generate_qr(data):
@@ -497,8 +818,120 @@ def build_back_markup(lang, callback_data="info_back"):
     )
     return markup
 
+# === Ավտոմատ ողջույն՝ օրվա ժամին համապատասխան ===
+TZ_OFFSET_HOURS = int(os.environ.get('TZ_OFFSET_HOURS', '3'))  # default՝ մոսկովյան ժամանակ (UTC+3)
+GREET_GAP_HOURS = 6  # նվազագույն դադար (ժամ), որից հետո բոտը նորից կողջունի
+
+
+def time_greeting(lang, name):
+    """Օրվա ժամին համապատասխան ողջույն՝ 3 լեզվով։"""
+    hour = (datetime.utcnow() + timedelta(hours=TZ_OFFSET_HOURS)).hour
+    if 5 <= hour < 12:
+        greet = tr(lang, "🌅 Բարի առավոտ", "🌅 Доброе утро", "🌅 Good morning")
+    elif 12 <= hour < 18:
+        greet = tr(lang, "☀️ Բարի օր", "☀️ Добрый день", "☀️ Good afternoon")
+    elif 18 <= hour < 23:
+        greet = tr(lang, "🌆 Բարի երեկո", "🌆 Добрый вечер", "🌆 Good evening")
+    else:
+        greet = tr(lang, "🌙 Բարի գիշեր", "🌙 Доброй ночи", "🌙 Good night")
+    return f"{greet}, {name} 👋" if name else f"{greet} 👋"
+
+
+def maybe_birthday(user_id, lang, first_name=""):
+    """🎂 Տարին մեկ անգամ շնորհավորում է օգտատիրոջ ծննդյան օրը (մոսկովյան ժամով)։"""
+    row = db_execute("SELECT birthday, bday_greeted_year FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    if not row or not row[0]:
+        return
+    local_now = datetime.utcnow() + timedelta(hours=TZ_OFFSET_HOURS)
+    if row[0] != local_now.strftime('%d.%m'):
+        return
+    if row[1] == local_now.year:
+        return
+    db_execute("UPDATE users SET bday_greeted_year = %s WHERE user_id = %s", (local_now.year, user_id), commit=True)
+    name = (first_name or "").strip()
+    nm = f", {name}" if name else ""
+    msg = tr(lang,
+             f"🎂🎉 Ծնունդդ շնորհավոր{nm}! Թող ինտերնետդ միշտ արագ լինի, իսկ կապը՝ անխափան 🥳 VedaVPN-ի թիմից 💙",
+             f"🎂🎉 С днём рождения{nm}! Пусть интернет всегда будет быстрым, а соединение — стабильным 🥳 Команда VedaVPN 💙",
+             f"🎂🎉 Happy birthday{nm}! May your internet always be fast and your connection rock-solid 🥳 From the VedaVPN team 💙")
+    try:
+        bot.send_message(user_id, msg)
+    except Exception:
+        pass
+
+
+_CHAMP_CHECK_TS = {'ts': 0.0}
+
+
+def check_month_champion():
+    """🏅 Ամսվա սկզբին ավտոմատ որոշում է նախորդ ամսվա թոպ հրավիրողին ու շնորհավորում։"""
+    now = datetime.utcnow()
+    prev_last_day = now.replace(day=1) - timedelta(days=1)
+    prev_month = prev_last_day.strftime('%Y-%m')
+    if get_config('champion_month') == prev_month:
+        return
+    set_config('champion_month', prev_month)  # նախ նշում ենք, որ կրկնակի հայտարարություն չլինի
+    row = db_execute(
+        "SELECT referrer_id, COUNT(*) FROM referral_log "
+        "WHERE to_char(ts, 'YYYY-MM') = %s "
+        "GROUP BY referrer_id ORDER BY COUNT(*) DESC, referrer_id ASC LIMIT 1",
+        (prev_month,), fetchone=True)
+    if not row or not row[1]:
+        set_config('champion_id', '')
+        set_config('champion_count', '0')
+        set_config('champion_name', '')
+        return
+    champ_id, champ_count = row[0], row[1]
+    set_config('champion_id', str(champ_id))
+    set_config('champion_count', str(champ_count))
+    champ_name = ''
+    try:
+        champ_name = (bot.get_chat(champ_id).first_name or '').strip()[:64]
+    except Exception:
+        pass
+    set_config('champion_name', champ_name)
+    champ_lang = get_lang(champ_id)
+    msg = tr(champ_lang,
+             f"👑 Շնորհավո՜ր. դու անցած ամսվա ՉԵՄՊԻՈՆՆ ես՝ {champ_count} հրավերով 🏅 Շարունակիր նույն ոգով 💪",
+             f"👑 Поздравляем! Ты ЧЕМПИОН прошлого месяца — {champ_count} приглашений 🏅 Так держать 💪",
+             f"👑 Congrats! You are last month's CHAMPION with {champ_count} invites 🏅 Keep it up 💪")
+    try:
+        bot.send_message(champ_id, msg)
+    except Exception:
+        pass
+    try:
+        bot.send_message(ADMIN_ID,
+                         f"🏅 Ամսվա չեմպիոն ({prev_month})՝ <code>{champ_id}</code> {fb_escape(champ_name)} — {champ_count} հրավեր",
+                         parse_mode="HTML")
+    except Exception:
+        pass
+
+
+def maybe_greet(user_id, first_name):
+    """Ողջունում է օգտատիրոջն իր անունով, երբ նա բոտ է «մտնում» երկար դադարից հետո։"""
+    row = db_execute("SELECT lang, last_seen FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    if not row or not row[0]:
+        return  # նոր օգտատեր է՝ /start-ի ողջույնը կաշխատի
+    lang, last_seen = row[0], row[1]
+    now = datetime.utcnow()
+    db_execute("UPDATE users SET last_seen = %s WHERE user_id = %s", (now, user_id), commit=True)
+    # 🎂 Ծննդյան օրվա ստուգում՝ ցանկացած ակտիվության պահին
+    try:
+        maybe_birthday(user_id, lang, first_name)
+    except Exception:
+        log.exception("birthday check failed")
+    if last_seen is not None and (now - last_seen) < timedelta(hours=GREET_GAP_HOURS):
+        return
+    try:
+        bot.send_message(user_id, time_greeting(lang, first_name))
+    except Exception:
+        log.exception("greeting failed")
+
+
 def send_vpn_link(chat_id, lang):
-    link = get_config('vpn_link')
+    # Ամեն օգտատեր ստանում է ԻՐ անհատական հղումը (նույն բովանդակությամբ),
+    # ինչը թույլ է տալիս անհրաժեշտության դեպքում անջատել կոնկրետ օգտատիրոջ (/ban)։
+    link = get_personal_sub_link(chat_id)
     caption = get_content('text_vpn_caption', lang).format(link=link)
     qr_bio = generate_qr(link)
     show_typing(chat_id)
@@ -507,7 +940,7 @@ def send_vpn_link(chat_id, lang):
         chat_id, qr_bio, caption=caption,
         reply_markup=build_app_markup(chat_id, lang),
     )
-    done = "✅ Պատ��աստ է՝ քո VPN հղումը վերևում է։" if lang == 'hy' else "✅ Готово — ваша VPN-ссылка выше։"
+    done = tr(lang, "✅ Պատրաստ է՝ քո VPN հղումը վերևում է։", "✅ Готово — ваша VPN-ссылка выше.", "✅ Done — your VPN link is above.")
     bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
 
 
@@ -523,15 +956,33 @@ def switch_device(call):
         )
     except Exception:
         pass
-    ok = "✅ Սարքը փոխվեց" if lang == 'hy' else "✅ Устройство изменено"
+    ok = tr(lang, "✅ Սարքը փոխվեց", "✅ Устройство изменено", "✅ Device changed")
     bot.answer_callback_query(call.id, ok)
 
 
 # === CAPTCHA (only shown to brand-new users, to block bots/fake ref accounts) ===
-# In-memory is enough here: telebot runs threaded=False / single process,
-# and a captcha only needs to survive a few seconds until the user taps a button.
-PENDING_CAPTCHA = {}
+# State-ը պահվում է DB-ում (ոչ թե in-memory dict-ում), որպեսզի gunicorn-ի
+# մի քանի worker-ների դեպքում captcha-ն չկոտրվի։
 CAPTCHA_TIMEOUT = 90  # seconds
+
+
+def set_pending_captcha(user_id, answer, ref_id):
+    db_execute(
+        "INSERT INTO pending_captcha (user_id, answer, ref_id, ts) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET answer = EXCLUDED.answer, ref_id = EXCLUDED.ref_id, ts = EXCLUDED.ts",
+        (user_id, answer, ref_id, time.time()), commit=True
+    )
+
+
+def get_pending_captcha(user_id):
+    row = db_execute("SELECT answer, ref_id, ts FROM pending_captcha WHERE user_id = %s", (user_id,), fetchone=True)
+    if not row:
+        return None
+    return {'answer': row[0], 'ref_id': row[1], 'ts': row[2]}
+
+
+def clear_pending_captcha(user_id):
+    db_execute("DELETE FROM pending_captcha WHERE user_id = %s", (user_id,), commit=True)
 
 
 def send_captcha(user_id, ref_id):
@@ -543,13 +994,13 @@ def send_captcha(user_id, ref_id):
     options = wrong + [correct]
     random.shuffle(options)
 
-    PENDING_CAPTCHA[user_id] = {'answer': correct, 'ref_id': ref_id, 'ts': time.time()}
+    set_pending_captcha(user_id, correct, ref_id)
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(*[types.InlineKeyboardButton(str(opt), callback_data=f"captcha_{opt}") for opt in options])
     bot.send_message(
         user_id,
-        f"🤖 Հաստատեք, որ ռոբոտ չեք / Подтвердите, ч��о вы не робот\n\n<b>{a} + {b} = ?</b>",
+        f"🤖 Հաստատեք, որ ռոբոտ չեք / Подтвердите, что вы не робот / Prove you are not a robot\n\n<b>{a} + {b} = ?</b>",
         reply_markup=markup
     )
 
@@ -557,10 +1008,10 @@ def send_captcha(user_id, ref_id):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('captcha_'))
 def process_captcha(call):
     user_id = call.from_user.id
-    pending = PENDING_CAPTCHA.get(user_id)
+    pending = get_pending_captcha(user_id)
 
     if not pending or time.time() - pending['ts'] > CAPTCHA_TIMEOUT:
-        PENDING_CAPTCHA.pop(user_id, None)
+        clear_pending_captcha(user_id)
         bot.answer_callback_query(call.id, "⏰ Ժամկետը լրացել է / Время истекло. /start")
         try:
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
@@ -579,7 +1030,7 @@ def process_captcha(call):
         return
 
     ref_id = pending['ref_id']
-    PENDING_CAPTCHA.pop(user_id, None)
+    clear_pending_captcha(user_id)
     bot.answer_callback_query(call.id, "✅ OK")
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -605,12 +1056,18 @@ def start(message):
 
 
 def finish_start(user_id, ref_id, name=""):
-    db_execute(
-        "INSERT INTO users (user_id, ref_by) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
-        (user_id, ref_id), commit=True
+    # RETURNING-ը ցույց է տալիս՝ օգտատերը իսկապես ՆՈՐ գրանցվե՞ց։ Ռեֆերալի
+    # հաշվիչն ավելանում է ՄԻԱՅՆ նոր գրանցման դեպքում, որպեսզի հին օգտատերը
+    # չկարողանա կրկնակի /start-երով արհեստականորեն ուռճացնել հաշվիչը։
+    inserted = db_execute(
+        "INSERT INTO users (user_id, ref_by) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+        (user_id, ref_id), fetchone=True, commit=True
     )
-    if ref_id > 0 and ref_id != user_id:
+    if inserted is not None and ref_id > 0 and ref_id != user_id:
         db_execute("UPDATE users SET ref_count = ref_count + 1 WHERE user_id = %s", (ref_id,), commit=True)
+        # Գրանցում ենք ամսաթվով՝ «Ամսվա չեմպիոն»-ի հաշվարկի համար
+        db_execute("INSERT INTO referral_log (referrer_id) VALUES (%s)", (ref_id,), commit=True)
+        notify_ref_progress(ref_id)
 
     # Remove the old menu buttons shown below, until the language is chosen
     welcome_photo = get_config('welcome_photo')
@@ -629,6 +1086,7 @@ def finish_start(user_id, ref_id, name=""):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🇦🇲 Հայերեն", callback_data="lang_hy"),
                types.InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"))
+    markup.add(types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"))
     bot.send_message(user_id, "👇", reply_markup=markup)
 
 
@@ -639,27 +1097,32 @@ def set_lang(call):
     name = (call.from_user.first_name or "").strip()
     if lang == 'hy':
         greeting = f"Բարև, {name} 👋 Բարի գալուստ VedaVPN 🛡" if name else "Բարև 👋 Բարի գալուստ VedaVPN 🛡"
+    elif lang == 'en':
+        greeting = f"Hi, {name} 👋 Welcome to VedaVPN 🛡" if name else "Hi 👋 Welcome to VedaVPN 🛡"
     else:
         greeting = f"Привет, {name} 👋 Добро пожаловать в VedaVPN 🛡" if name else "Привет 👋 Добро пожаловать в VedaVPN 🛡"
-    bot.send_message(call.from_user.id, greeting, reply_markup=get_main_menu(lang))
+    bot.send_message(call.from_user.id, greeting, reply_markup=types.ReplyKeyboardRemove())
+    send_main_menu(call.from_user.id, lang)
 
 
 # === VPN CHECK ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_get_vpn', 'hy'), get_content('btn_get_vpn', 'ru')))
+def sec_vpn(chat_id, lang, message_id=None):
+    if not check_sub(chat_id):
+        markup = types.InlineKeyboardMarkup()
+        sub_label = tr(lang, "📢 Բաժանորդագրվել", "📢 Подписаться", "📢 Subscribe")
+        check_label = tr(lang, "🔄 Ստուգել", "🔄 Проверить", "🔄 Check")
+        markup.add(types.InlineKeyboardButton(sub_label, url="https://t.me/" + CHANNEL.replace("@", "")))
+        markup.add(types.InlineKeyboardButton(check_label, callback_data="check_sub"))
+        markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+        edit_or_send(chat_id, message_id, card(get_content('btn_get_vpn', lang), get_content('text_subscribe_warn', lang)), markup)
+        return
+    send_vpn_link(chat_id, lang)
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_get_vpn'))
 def get_vpn(message):
     lang = get_lang(message.chat.id)
-    if not check_sub(message.chat.id):
-        markup = types.InlineKeyboardMarkup()
-        if lang == 'hy':
-            markup.add(types.InlineKeyboardButton("📢 Բաժանորդագրվել", url=f"https://t.me/{CHANNEL.replace('@', '')}"))
-            markup.add(types.InlineKeyboardButton("🔄 Ստուգել", callback_data="check_sub"))
-        else:
-            markup.add(types.InlineKeyboardButton("📢 Подписаться", url=f"https://t.me/{CHANNEL.replace('@', '')}"))
-            markup.add(types.InlineKeyboardButton("🔄 Проверить", callback_data="check_sub"))
-
-        bot.send_message(message.chat.id, get_content('text_subscribe_warn', lang), reply_markup=markup)
-        return
-    send_vpn_link(message.chat.id, lang)
+    sec_vpn(message.chat.id, lang)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
@@ -673,21 +1136,29 @@ def check_sub_callback(call):
 
 
 # === HOW TO INSTALL ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_howto', 'hy'), get_content('btn_howto', 'ru')))
+def sec_howto(chat_id, lang, message_id=None):
+    edit_or_send(chat_id, message_id, card(get_content('btn_howto', lang), get_content('text_howto', lang)), build_nav_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_howto'))
 def howto(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_howto', lang), reply_markup=build_nav_markup(lang))
+    sec_howto(message.chat.id, lang)
 
 
 # === FAQ ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_faq', 'hy'), get_content('btn_faq', 'ru')))
+def sec_faq(chat_id, lang, message_id=None):
+    edit_or_send(chat_id, message_id, card(get_content('btn_faq', lang), get_content('text_faq', lang)), build_nav_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_faq'))
 def faq(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_faq', lang), reply_markup=build_nav_markup(lang))
+    sec_faq(message.chat.id, lang)
 
 
 # === AUTOMATIC UNSUBSCRIBE WARNING ===
@@ -707,24 +1178,32 @@ def handle_membership_change(update):
 
         if was_subscribed and now_unsubscribed:
             lang = get_lang(user_id)
-            btn_text = "📢 Բաժանորդագրվե�� կրկին" if lang == 'hy' else "📢 Подписаться снова"
+            btn_text = tr(lang, "📢 Բաժանորդագրվել կրկին", "📢 Подписаться снова", "📢 Subscribe again")
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton(btn_text, url=f"https://t.me/{channel_username}"))
             bot.send_message(user_id, get_content('text_unsub_warning', lang), reply_markup=markup, parse_mode="HTML")
     except Exception:
-        pass
+        log.exception("membership change handling failed")
 
 
 # === REFERRALS, FORUM ===
 # === REFERRAL TIERS ===
 # (շեմ, badge, հայերեն անուն, ռուսերեն անուն)
 REF_TIERS = [
-    (0, "🔰", "Սկսնակ", "Новичок"),
-    (1, "🥉", "Բրонզ", "Бронза"),
-    (5, "🥈", "Արծաթ", "Серебро"),
-    (10, "🥇", "Ոսկի", "Золото"),
-    (20, "💎", "Ադամանդ", "Алмаз"),
+    (0, "🔰", "Սկսնակ", "Новичок", "Rookie"),
+    (1, "🥉", "Բրոնզ", "Бронза", "Bronze"),
+    (5, "🥈", "Արծաթ", "Серебро", "Silver"),
+    (10, "🥇", "Ոսկի", "Золото", "Gold"),
+    (20, "💎", "Ադամանդ", "Алмаз", "Diamond"),
 ]
+
+
+def tier_name(tier, lang):
+    if lang == 'hy':
+        return tier[2]
+    if lang == 'en':
+        return tier[4]
+    return tier[3]
 
 
 def get_ref_tier(count, lang):
@@ -736,7 +1215,7 @@ def get_ref_tier(count, lang):
             current = tier
             nxt = REF_TIERS[i + 1] if i + 1 < len(REF_TIERS) else None
     badge = current[1]
-    name = current[2] if lang == 'hy' else current[3]
+    name = tier_name(current, lang)
 
     if nxt:
         need = nxt[0] - count
@@ -744,48 +1223,98 @@ def get_ref_tier(count, lang):
         filled = int(((count - current[0]) / span) * 5) if span else 0
         filled = max(0, min(5, filled))
         bar = "▰" * filled + "▱" * (5 - filled)
-        nxt_name = nxt[2] if lang == 'hy' else nxt[3]
+        nxt_name = tier_name(nxt, lang)
         if lang == 'hy':
             progress = f"{bar}\n⬆️ Եւս {need} հրավեր → {nxt[1]} {nxt_name}"
+        elif lang == 'en':
+            progress = f"{bar}\n⬆️ {need} more invites → {nxt[1]} {nxt_name}"
         else:
             progress = f"{bar}\n⬆️ Ещё {need} приглашений → {nxt[1]} {nxt_name}"
     else:
         bar = "▰▰▰▰▰"
-        top_msg = "👑 Առավելագույն մակարդակն է՝ հասած ես!" if lang == 'hy' else "👑 Достигнут максимальный уровень!"
+        top_msg = tr(lang, "👑 Առավելագույն մակարդակն է՝ հասած ես!", "👑 Достигнут максимальный уровень!", "👑 You've reached the top level!")
         progress = f"{bar}\n{top_msg}"
 
     if lang == 'hy':
         header = f"{badge} Ձեր մակարդակը՝ <b>{name}</b>"
+    elif lang == 'en':
+        header = f"{badge} Your level: <b>{name}</b>"
     else:
         header = f"{badge} Ваш уровень: <b>{name}</b>"
     return f"{header}\n{progress}"
 
 
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_referrals', 'hy'), get_content('btn_referrals', 'ru')))
-def show_refs(message):
-    lang = get_lang(message.chat.id)
-    row = db_execute("SELECT ref_count FROM users WHERE user_id = %s", (message.chat.id,), fetchone=True)
+def notify_ref_progress(ref_id):
+    """Ծանուցում հրավիրողին նոր ռեֆերալի մասին. մակարդակի փոփոխության դեպքում՝ շնորհավորանք։"""
+    try:
+        row = db_execute("SELECT ref_count, lang FROM users WHERE user_id = %s", (ref_id,), fetchone=True)
+        if not row:
+            return
+        count = row[0] or 0
+        lang = row[1] or 'ru'
+        tier = next((t for t in REF_TIERS if t[0] == count and t[0] > 0), None)
+        if tier:
+            t_name = tier_name(tier, lang)
+            if lang == 'hy':
+                msg = f"🎉 Շնորհավո՛ր, նոր մակարդակ՝ {tier[1]} <b>{t_name}</b> ({count} հրավեր)"
+            elif lang == 'en':
+                msg = f"🎉 Congrats, new level: {tier[1]} <b>{t_name}</b> ({count} invites)"
+            else:
+                msg = f"🎉 Поздравляем, новый уровень: {tier[1]} <b>{t_name}</b> ({count} приглаш.)"
+        else:
+            if lang == 'hy':
+                msg = f"👥 +1 նոր ռեֆերալ։ Ընդամենը՝ {count}"
+            elif lang == 'en':
+                msg = f"👥 +1 new referral. Total: {count}"
+            else:
+                msg = f"👥 +1 новый реферал. Всего: {count}"
+        bot.send_message(ref_id, msg)
+    except Exception:
+        log.exception("notify_ref_progress failed")
+
+
+def sec_refs(chat_id, lang, message_id=None):
+    row = db_execute("SELECT ref_count FROM users WHERE user_id = %s", (chat_id,), fetchone=True)
     count = row[0] if row else 0
     tier_line = get_ref_tier(count, lang)
+    ref_link = "https://t.me/vedavpn_bot?start=" + str(chat_id)
     if lang == 'hy':
-        text = f"👥 Ձեր հրավիրած օգտատերերը՝ {count}\n🔗 Հղում՝ https://t.me/vedavpn_bot?start={message.chat.id}"
-    else:
-        text = f"👥 Ваших рефералов: {count}\n🔗 Ссылка: https://t.me/vedavpn_bot?start={message.chat.id}"
-    show_typing(message.chat.id)
-    hide_main_menu(message.chat.id)
-    ref_link = f"https://t.me/vedavpn_bot?start={message.chat.id}"
-    if lang == 'hy':
+        text = f"👥 Ձեր հրավիրած օգտատերերը՝ {count}\n🔗 Հղում՝ {ref_link}"
         share_text = "🛡 Անվճար VPN VedaVPN-ից՝ միացիր իմ հղումով 👇"
         share_label = "📤 Կիսվել ընկերոջ հետ"
+        lb_label = "🏆 Թոփ-10 հրավիրողներ"
+    elif lang == 'en':
+        text = f"👥 Your referrals: {count}\n🔗 Link: {ref_link}"
+        share_text = "🛡 Free VPN from VedaVPN — join with my link 👇"
+        share_label = "📤 Share with a friend"
+        lb_label = "🏆 Top 10 inviters"
     else:
+        text = f"👥 Ваших рефералов: {count}\n🔗 Ссылка: {ref_link}"
         share_text = "🛡 Бесплатный VPN от VedaVPN — подключайся по моей ссылке 👇"
         share_label = "📤 Поделиться с другом"
-    share_url = f"https://t.me/share/url?url={quote(ref_link)}&text={quote(share_text)}"
+        lb_label = "🏆 Топ-10 приглашающих"
+    share_url = "https://t.me/share/url?url=" + quote(ref_link) + "&text=" + quote(share_text)
     share_btn = types.InlineKeyboardButton(share_label, url=share_url)
-    lb_label = "🏆 Թոփ-10 հրավիրողներ" if lang == 'hy' else "🏆 Топ-10 приглашающих"
     lb_btn = types.InlineKeyboardButton(lb_label, callback_data="ref_leaderboard")
-    text = tier_line + "\n\n" + text
-    bot.send_message(message.chat.id, text, reply_markup=build_nav_markup(lang, extra_rows=[share_btn, lb_btn]))
+    champ_line = ""
+    champ_id = get_config('champion_id')
+    if champ_id:
+        champ_name = fb_escape(get_config('champion_name')) or tr(lang, "Օգտատեր", "Пользователь", "User")
+        champ_count = get_config('champion_count') or "0"
+        champ_line = tr(lang,
+                        f"👑 Անցած ամսվա չեմպիոնը՝ <b>{champ_name}</b> ({champ_count} հրավեր)",
+                        f"👑 Чемпион прошлого месяца: <b>{champ_name}</b> ({champ_count} пригл.)",
+                        f"👑 Last month's champion: <b>{champ_name}</b> ({champ_count} invites)") + "\n\n"
+    text = tier_line + "\n\n" + champ_line + text
+    edit_or_send(chat_id, message_id, card(get_content('btn_referrals', lang), text), build_nav_markup(lang, extra_rows=[share_btn, lb_btn]))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_referrals'))
+def show_refs(message):
+    lang = get_lang(message.chat.id)
+    show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
+    sec_refs(message.chat.id, lang)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ref_leaderboard")
@@ -797,19 +1326,24 @@ def ref_leaderboard(call):
         "SELECT user_id, ref_count FROM users WHERE ref_count > 0 ORDER BY ref_count DESC, user_id ASC LIMIT 10",
         fetchall=True
     ) or []
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    medals = {1: "��", 2: "🥈", 3: "🥉"}
     if lang == 'hy':
         title = "🏆 <b>Թոփ-10 հրավիրողներ</b>"
         empty = "Դեռ ոչ ոք չունի հրավերներ։ Եղիր առաջինը 🚀"
         you_label = "Դու"
         unit = "հրավեր"
+    elif lang == 'en':
+        title = "🏆 <b>Top 10 inviters</b>"
+        empty = "No one has invites yet. Be the first 🚀"
+        you_label = "You"
+        unit = "invites"
     else:
         title = "🏆 <b>Топ-10 приглашающих</b>"
         empty = "Пока ни у кого нет приглашений. Стань первым 🚀"
         you_label = "Вы"
         unit = "приглаш."
     if not top:
-        bot.send_message(call.from_user.id, f"{title}\n\n{empty}", reply_markup=build_nav_markup(lang))
+        edit_or_send(call.message.chat.id, call.message.message_id, f"{title}\n\n{empty}", build_nav_markup(lang, back_callback="menu_refs"))
         return
     lines = [title, ""]
     for i, (uid, cnt) in enumerate(top, 1):
@@ -826,55 +1360,74 @@ def ref_leaderboard(call):
             lines.append("")
             if lang == 'hy':
                 lines.append(f"➖➖➖\n{you_label}՝ #{my_rank} տեղում ({my_count} {unit})")
+            elif lang == 'en':
+                lines.append(f"➖➖➖\n{you_label}: #{my_rank} place ({my_count} {unit})")
             else:
                 lines.append(f"➖➖➖\n{you_label}: #{my_rank} место ({my_count} {unit})")
-    bot.send_message(call.from_user.id, "\n".join(lines), reply_markup=build_nav_markup(lang))
+    edit_or_send(call.message.chat.id, call.message.message_id, "\n".join(lines), build_nav_markup(lang, back_callback="menu_refs"))
 
 
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_forum', 'hy'), get_content('btn_forum', 'ru')))
+def sec_forum(chat_id, lang, message_id=None):
+    btn_text = tr(lang, "🔗 Ֆորում", "🔗 Форум", "🔗 Forum")
+    msg_text = tr(lang, "💬 Միացիր մեր ֆորումին՝ սեղմիր կոճակը 👇", "💬 Наш форум — жми на кнопку 👇", "💬 Our forum — tap the button 👇")
+    forum_btn = types.InlineKeyboardButton(btn_text, url=get_config('forum_link'))
+    edit_or_send(chat_id, message_id, card(get_content('btn_forum', lang), msg_text), build_nav_markup(lang, extra_rows=[forum_btn]))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_forum'))
 def forum(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
-    btn_text = "🔗 Ֆորում" if lang == 'hy' else "🔗 Форум"
-    msg_text = "💬 Մեր ֆորումը՝" if lang == 'hy' else "💬 Наш форум:"
-    forum_btn = types.InlineKeyboardButton(btn_text, url=get_config('forum_link'))
-    bot.send_message(message.chat.id, msg_text, reply_markup=build_nav_markup(lang, extra_rows=[forum_btn]))
+    sec_forum(message.chat.id, lang)
 
 
 # === IPTV ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_iptv', 'hy'), get_content('btn_iptv', 'ru')))
-def iptv(message):
-    lang = get_lang(message.chat.id)
-    show_typing(message.chat.id)
-    hide_main_menu(message.chat.id)
+def sec_iptv(chat_id, lang, message_id=None):
+    title = get_content('btn_iptv', lang)
     link = get_config('iptv_link')
     if not link:
-        bot.send_message(message.chat.id, get_content('text_iptv_missing', lang), reply_markup=build_nav_markup(lang))
+        edit_or_send(chat_id, message_id, card(title, get_content('text_iptv_missing', lang)), build_nav_markup(lang))
         return
     caption = get_content('text_iptv_caption', lang).format(link=link)
     instructions = get_content('text_iptv_instructions', lang).strip()
     if instructions:
         caption += "\n\n" + instructions
-    bot.send_message(message.chat.id, caption, reply_markup=build_nav_markup(lang))
+    edit_or_send(chat_id, message_id, card(title, caption), build_nav_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_iptv'))
+def iptv(message):
+    lang = get_lang(message.chat.id)
+    show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
+    sec_iptv(message.chat.id, lang)
 
 
 # === SUPPORT ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_support', 'hy'), get_content('btn_support', 'ru')))
+def sec_support(chat_id, lang, message_id=None):
+    edit_or_send(chat_id, message_id, card(get_content('btn_support', lang), get_content('text_support_prompt', lang)), build_nav_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_support'))
 def support(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_support_prompt', lang), reply_markup=build_nav_markup(lang))
+    sec_support(message.chat.id, lang)
 
 
 # === TERMS & PRIVACY ===
-@bot.message_handler(func=lambda m: m.text in (get_content('btn_info', 'hy'), get_content('btn_info', 'ru')))
+def sec_info(chat_id, lang, message_id=None):
+    edit_or_send(chat_id, message_id, card(get_content('btn_info', lang), get_content('text_info_prompt', lang)), build_info_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_info'))
 def info_menu(message):
     lang = get_lang(message.chat.id)
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
-    bot.send_message(message.chat.id, get_content('text_info_prompt', lang), reply_markup=build_info_markup(lang))
+    sec_info(message.chat.id, lang)
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("info_terms", "info_privacy"))
@@ -915,13 +1468,256 @@ def info_back(call):
         )
 
 
+# === 🎂 Ծննդյան օր ===
+@bot.message_handler(commands=['birthday'])
+def set_birthday(message):
+    """/birthday 25.04 — օգտատերը նշում է ծննդյան օրը, բոտը տարին մեկ շնորհավորում է։"""
+    lang = get_lang(message.chat.id)
+    parts = (message.text or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if arg:
+        norm = arg.replace('/', '.').replace('-', '.').replace(',', '.')
+        pieces = [p for p in norm.split('.') if p]
+        d = m = 0
+        try:
+            d, m = int(pieces[0]), int(pieces[1])
+            datetime(2000, m, d)  # վալիդացիա
+        except Exception:
+            d = m = 0
+        if d and m:
+            db_execute("UPDATE users SET birthday = %s, bday_greeted_year = NULL WHERE user_id = %s",
+                       (f"{d:02d}.{m:02d}", message.chat.id), commit=True)
+            bot.send_message(message.chat.id, tr(lang,
+                f"🎂 Հիշեցի՝ {d:02d}.{m:02d}։ Այդ օրը անակնկալ կլինի 😉",
+                f"🎂 Запомнил: {d:02d}.{m:02d}. Жди сюрприз в этот день 😉",
+                f"🎂 Got it: {d:02d}.{m:02d}. Expect a surprise that day 😉"))
+            return
+    bot.send_message(message.chat.id, tr(lang,
+        "🎂 Գրիր ծննդյանդ օրը այսպես՝ <code>/birthday 25.04</code> (օր.ամիս)",
+        "🎂 Укажи день рождения так: <code>/birthday 25.04</code> (день.месяц)",
+        "🎂 Set your birthday like this: <code>/birthday 25.04</code> (day.month)"), parse_mode="HTML")
+
+
+# === FEEDBACK (⭐ Գնահատիր բոտը) ===
+def fb_escape(s):
+    """Օգտատիրոջ տեքստի HTML escape՝ parse_mode=HTML-ի համար։"""
+    return (s or "").replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def pop_pending_feedback(user_id, max_age=900):
+    """True, եթե օգտատերը վերջին 15 րոպեում գնահատել է ու սպասում ենք մեկնաբանության։"""
+    row = db_execute("SELECT ts FROM pending_feedback WHERE user_id = %s", (user_id,), fetchone=True)
+    if not row:
+        return False
+    db_execute("DELETE FROM pending_feedback WHERE user_id = %s", (user_id,), commit=True)
+    return (time.time() - row[0]) <= max_age
+
+
+def build_rate_markup(lang, current=0):
+    markup = types.InlineKeyboardMarkup()
+    stars = [types.InlineKeyboardButton(("⭐" if i <= current else "☆") + str(i),
+                                        callback_data=f"rate_{i}") for i in range(1, 6)]
+    markup.row(*stars)
+    markup.add(types.InlineKeyboardButton(
+        tr(lang, "💬 Կարծիքներ", "💬 Отзывы", "💬 Reviews"),
+        callback_data="menu_reviews"))
+    markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+    return markup
+
+
+def sec_rate(chat_id, lang, message_id=None):
+    """⭐ Գնահատիր բոտը բաժինը՝ 1-5 աստղ, in-place։"""
+    row = db_execute("SELECT rating FROM feedback WHERE user_id = %s", (chat_id,), fetchone=True)
+    current = row[0] if row and row[0] else 0
+    stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
+    total = stats[0] if stats and stats[0] else 0
+    avg_line = ""
+    if total:
+        avg = float(stats[1] or 0)
+        avg_line = tr(lang,
+                      f"🌟 Միջին գնահատականը՝ <b>{avg:.1f}/5</b> ({total} ձայն)\n\n",
+                      f"🌟 Средняя оценка: <b>{avg:.1f}/5</b> ({total} гол.)\n\n",
+                      f"🌟 Average rating: <b>{avg:.1f}/5</b> ({total} votes)\n\n")
+    title = tr(lang, "Գնահատիր բոտը", "Оцени бота", "Rate the bot")
+    if current:
+        body = tr(lang,
+                  f"Քո գնահատականը՝ {'⭐' * current} ({current}/5)։ Կարող ես փոխել այն 👇",
+                  f"Твоя оценка: {'⭐' * current} ({current}/5). Можешь изменить её 👇",
+                  f"Your rating: {'⭐' * current} ({current}/5). You can change it 👇")
+    else:
+        body = tr(lang,
+                  "Որքանո՞վ ես գոհ բոտից։ Ընտրիր 1-ից 5 աստղ 👇",
+                  "Насколько тебе нравится бот? Выбери от 1 до 5 звёзд 👇",
+                  "How do you like the bot? Pick 1 to 5 stars 👇")
+    edit_or_send(chat_id, message_id, card(title, avg_line + body), build_rate_markup(lang, current))
+
+
+def sec_reviews(chat_id, lang, message_id=None):
+    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկնաբանությունները։"""
+    stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
+    total = stats[0] if stats and stats[0] else 0
+    title = tr(lang, "Կարծիքներ", "Отзывы", "Reviews")
+    if not total:
+        body = tr(lang,
+                  "Դեռ կարծիքներ չկան։ Եղիր առաջինը 👇",
+                  "Отзывов пока нет. Будь первым 👇",
+                  "No reviews yet. Be the first 👇")
+        edit_or_send(chat_id, message_id, card(title, body),
+                     build_nav_markup(lang, back_callback="menu_rate"))
+        return
+    avg = float(stats[1] or 0)
+    lines = [tr(lang,
+                f"🌟 Միջին գնահատականը՝ <b>{avg:.1f}/5</b> ({total} ձայն)",
+                f"🌟 Средняя оценка: <b>{avg:.1f}/5</b> ({total} гол.)",
+                f"🌟 Average rating: <b>{avg:.1f}/5</b> ({total} votes)"), ""]
+    rows = db_execute(
+        "SELECT name, rating, comment, reply FROM feedback "
+        "WHERE comment IS NOT NULL AND comment <> '' "
+        "ORDER BY updated_at DESC LIMIT 10", fetchall=True) or []
+    if rows:
+        for rv_name, rv_rating, rv_comment, rv_reply in rows:
+            who = fb_escape((rv_name or "").strip()) or tr(lang, "Օգտատեր", "Пользователь", "User")
+            lines.append(f"{'⭐' * (rv_rating or 0)} <b>{who}</b>")
+            lines.append(f"«{fb_escape(rv_comment[:200])}»")
+            if rv_reply:
+                reply_label = tr(lang, "↩️ VedaVPN-ի պատասխանը", "↩️ Ответ VedaVPN", "↩️ Reply from VedaVPN")
+                lines.append(f"<i>{reply_label}. {fb_escape(rv_reply[:200])}</i>")
+            lines.append("")
+    else:
+        lines.append(tr(lang,
+                        "Մեկնաբանություններ դեռ չկան, միայն գնահատականներ 🙂",
+                        "Комментариев пока нет, только оценки 🙂",
+                        "No comments yet, only ratings 🙂"))
+    edit_or_send(chat_id, message_id, card(title, "\n".join(lines).strip()),
+                 build_nav_markup(lang, back_callback="menu_rate"))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
+def rate_callback(call):
+    """Աստղի սեղմում. պահպանում ենք գնահատականը և առաջարկում մեկնաբանություն թողնել։"""
+    lang = get_lang(call.from_user.id)
+    try:
+        rating = max(1, min(5, int(call.data[5:])))
+    except (ValueError, TypeError):
+        bot.answer_callback_query(call.id)
+        return
+    db_execute(
+        "INSERT INTO feedback (user_id, rating, name, updated_at) VALUES (%s, %s, %s, now()) "
+        "ON CONFLICT (user_id) DO UPDATE SET rating = EXCLUDED.rating, name = EXCLUDED.name, updated_at = now()",
+        (call.from_user.id, rating, (call.from_user.first_name or "").strip()[:64]), commit=True
+    )
+    db_execute(
+        "INSERT INTO pending_feedback (user_id, ts) VALUES (%s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET ts = EXCLUDED.ts",
+        (call.from_user.id, time.time()), commit=True
+    )
+    bot.answer_callback_query(call.id, "⭐" * rating)
+    title = tr(lang, "Շնորհակալություն 🙏", "Спасибо 🙏", "Thank you 🙏")
+    body = tr(lang,
+              f"Գնահատականդ պահպանված է՝ {'⭐' * rating} ({rating}/5)։\n\nՑանկության դեպքում գրիր մեկ հաղորդագրությամբ, թե ինչ բարելավենք — այն կհասնի ադմինին։",
+              f"Оценка сохранена: {'⭐' * rating} ({rating}/5).\n\nЕсли хочешь, напиши одним сообщением, что улучшить — оно попадёт к админу.",
+              f"Your rating is saved: {'⭐' * rating} ({rating}/5).\n\nIf you like, send one message with what to improve — it will reach the admin.")
+    edit_or_send(call.message.chat.id, call.message.message_id, card(title, body),
+                 build_nav_markup(lang, back_callback="menu_rate"))
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def go_main_menu(call):
-    """Ցանկացած inline բաժնից վերադարձ գլխավոր մենյու։"""
+    """Ցանկացած inline բաժնից վերադարձ գլխավոր մենյու՝ in-place։"""
     lang = get_lang(call.from_user.id)
     bot.answer_callback_query(call.id)
-    txt = "🏠 Գլխավոր մենյու" if lang == 'hy' else "🏠 Главное меню"
-    bot.send_message(call.from_user.id, txt, reply_markup=get_main_menu(lang))
+    send_main_menu(call.message.chat.id, lang, message_id=call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("menu_"))
+def menu_router(call):
+    """Inline գլխավոր մենյուի բաժինների router՝ in-place նավիգացիայով։"""
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    mid = call.message.message_id
+    key = call.data[5:]
+    sections = {
+        "vpn": sec_vpn, "refs": sec_refs, "howto": sec_howto, "faq": sec_faq,
+        "support": sec_support, "forum": sec_forum, "iptv": sec_iptv, "info": sec_info,
+        "rate": sec_rate, "reviews": sec_reviews,
+    }
+    if key in sections:
+        sections[key](chat_id, lang, mid)
+        return
+    if key.startswith("cbtn_"):
+        try:
+            row = db_execute(
+                "SELECT label_hy, label_ru, response_hy, response_ru FROM custom_buttons WHERE id = %s",
+                (int(key[5:]),), fetchone=True
+            )
+        except Exception:
+            row = None
+        if row:
+            label = row[0] if lang == 'hy' else row[1]
+            resp = (row[2] if lang == 'hy' else row[3]) or ""
+            edit_or_send(chat_id, mid, card(label, resp), build_nav_markup(lang))
+
+
+# === ADMIN. Reply to a review ===
+@bot.message_handler(commands=['freply'])
+def feedback_reply(message):
+    """/freply <user_id> <տեքստ> — ադմինի պատասխան կարծիքին. երևում է «Կարծիքներ» բաժնում և ուղարկվում հեղինակին։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/freply user_id պատասխանի տեքստ</code>", parse_mode="HTML")
+        return
+    fb_uid = int(parts[1])
+    reply_text = parts[2].strip()[:500]
+    row = db_execute("SELECT rating, comment FROM feedback WHERE user_id = %s", (fb_uid,), fetchone=True)
+    if not row:
+        bot.send_message(ADMIN_ID, "Այդ ID-ով կարծիք չկա։")
+        return
+    db_execute("UPDATE feedback SET reply = %s WHERE user_id = %s", (reply_text, fb_uid), commit=True)
+    user_lang = get_lang(fb_uid)
+    notice = tr(user_lang,
+                f"↩️ VedaVPN-ը պատասխանել է քո կարծիքին․\n\n«{fb_escape(reply_text)}»",
+                f"↩️ VedaVPN ответил на твой отзыв:\n\n«{fb_escape(reply_text)}»",
+                f"↩️ VedaVPN replied to your review:\n\n«{fb_escape(reply_text)}»")
+    try:
+        bot.send_message(fb_uid, notice)
+        bot.send_message(ADMIN_ID, "✅ Պատասխանը պահպանվեց և ուղարկվեց հեղինակին։")
+    except Exception:
+        bot.send_message(ADMIN_ID, "✅ Պատասխանը պահպանվեց, բայց հեղինակին ուղարկել չստացվեց (հնարավոր է՝ բլոկել է բոտը)։")
+
+
+# === ADMIN. Feedback stats ===
+@bot.message_handler(commands=['feedback_stats'])
+def feedback_stats(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    rows = db_execute("SELECT rating, COUNT(*) FROM feedback GROUP BY rating", fetchall=True) or []
+    total = sum(r[1] for r in rows)
+    if not total:
+        bot.send_message(ADMIN_ID, "⭐ Դեռ գնահատականներ չկան։")
+        return
+    avg = sum((r[0] or 0) * r[1] for r in rows) / total
+    counts = {r[0]: r[1] for r in rows}
+    lines = ["⭐ <b>Feedback վիճակագրություն</b>",
+             f"Միջին գնահատական՝ <b>{avg:.2f}/5</b> ({total} ձայն)", ""]
+    for star in range(5, 0, -1):
+        n = counts.get(star, 0)
+        bar = "▮" * min(n, 20) + ("…" if n > 20 else "")
+        lines.append(f"{star}★ — {n} {bar}")
+    comments = db_execute(
+        "SELECT user_id, rating, comment FROM feedback "
+        "WHERE comment IS NOT NULL AND comment <> '' "
+        "ORDER BY updated_at DESC LIMIT 10", fetchall=True) or []
+    if comments:
+        lines.append("")
+        lines.append("💬 <b>Վերջին մեկնաբանությունները</b>")
+        for fb_uid, fb_r, fb_c in comments:
+            lines.append(f"• <code>{fb_uid}</code> {'⭐' * (fb_r or 0)} — {fb_escape(fb_c[:150])}")
+        lines.append("")
+        lines.append("↩️ Պատասխանելու համար. <code>/freply user_id տեքստ</code>")
+    bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
 
 
 # === ADMIN. General stats ===
@@ -936,6 +1732,10 @@ def admin_panel(message):
         f"📊 Օգտատերեր: {total}\n\n"
         f"<b>Հրամաններ.</b>\n"
         f"/stats — մանրամասն վիճակագրություն 📊\n"
+        f"/growth — վերջին 30 օրվա աճի գրաֆիկ 📈\n"
+        f"/export — օգտատերերի ցուցակը CSV ֆայլով 📁\n"
+        f"/ban ID — անջատել օգտատիրոջ sub հղումը 🚫\n"
+        f"/unban ID — վերականգնել օգտատիրոջ sub հղումը ✅\n"
         f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
         f"/reply ID տեքստ — պատասխանել user-ի\n"
         f"/listkeys — ��ույց տալ բոլոր editable content key-ները\n"
@@ -951,7 +1751,7 @@ def admin_panel(message):
         f"/listbuttons — ցույց տալ ավելացված կոճակները\n"
         f"/removebutton ID — հեռացնել կոճակ\n\n"
         f"<b>Sub ֆայլի կառավարում (GitHub).</b>\n"
-        f"/update_sub [տեքստ] — թա��մացնել ամբողջ sub ֆայլը\n"
+        f"/update_sub [տեքստ] — թա������ացնել ամբողջ sub ֆայլը\n"
         f"/append_sub [հղում] — ավելացնել նոր սերվեր (առանց ջնջելու)\n"
         f"/delete_sub_keyword [հիմնաբառ] — ջնջել սերվերը\n"
         f"/list_and_delete — ցույց տալ սերվերները կոճակներով\n"
@@ -975,6 +1775,8 @@ def stats_cmd(message):
     week = scalar("SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'")
     hy = scalar("SELECT COUNT(*) FROM users WHERE lang = 'hy'")
     ru = scalar("SELECT COUNT(*) FROM users WHERE lang = 'ru'")
+    en = scalar("SELECT COUNT(*) FROM users WHERE lang = 'en'")
+    banned_cnt = scalar("SELECT COUNT(*) FROM users WHERE banned")
     android = scalar("SELECT COUNT(*) FROM users WHERE device = 'android'")
     ios = scalar("SELECT COUNT(*) FROM users WHERE device = 'ios'")
     total_refs = scalar("SELECT COALESCE(SUM(ref_count), 0) FROM users")
@@ -994,14 +1796,16 @@ def stats_cmd(message):
         f"📅 Վերջին 7 օրը՝ <b>{week}</b>",
         "",
         "<b>🌍 Լեզուներ</b>",
-        f"🇦🇢 Հայերեն՝ {hy} ({pct(hy)})",
+        f"🇦🇲 Հայ��րեն՝ {hy} ({pct(hy)})",
         f"🇷🇺 Русский՝ {ru} ({pct(ru)})",
+        f"🇬🇧 English՝ {en} ({pct(en)})",
         "",
         "<b>📱 Սարքեր</b>",
         f"🤖 Android՝ {android}",
         f"🍏 iPhone՝ {ios}",
         "",
         f"🔗 Ընդհանուր ռեֆերալներ՝ <b>{total_refs}</b>",
+        f"🚫 Անջատված sub հղումներ՝ <b>{banned_cnt}</b>",
     ]
     if top:
         lines.append("")
@@ -1010,6 +1814,81 @@ def stats_cmd(message):
             lines.append(f"{i}. <code>{uid}</code> — {cnt}")
 
     bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
+
+
+@bot.message_handler(commands=['export'])
+def export_users_cmd(message):
+    """Օգտատերերի ամբողջ ցուցակը CSV ֆայլով՝ ադմինի համար։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    rows = db_execute(
+        "SELECT user_id, lang, ref_by, ref_count, device, created_at, banned, sub_fetches, last_sub_at FROM users ORDER BY created_at",
+        fetchall=True
+    ) or []
+    from io import StringIO
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["user_id", "lang", "ref_by", "ref_count", "device", "created_at", "banned", "sub_fetches", "last_sub_at"])
+    for r in rows:
+        writer.writerow(r)
+    bio = BytesIO(buf.getvalue().encode('utf-8-sig'))
+    bio.name = "vedavpn_users.csv"
+    bot.send_document(ADMIN_ID, bio, caption=f"📁 Ընդամենը {len(rows)} օգտատեր")
+
+
+@bot.message_handler(commands=['growth'])
+def growth_cmd(message):
+    """Վերջին 30 օրվա նոր գրանցումների տեքստային գրաֆիկ։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    rows = db_execute(
+        "SELECT created_at::date AS d, COUNT(*) FROM users "
+        "WHERE created_at >= CURRENT_DATE - INTERVAL '29 days' "
+        "GROUP BY d ORDER BY d",
+        fetchall=True
+    ) or []
+    counts = {r[0]: r[1] for r in rows}
+    today = date.today()
+    days = [today - timedelta(days=i) for i in range(29, -1, -1)]
+    mx = max([counts.get(d, 0) for d in days] + [1])
+    lines = ["📈 <b>Նոր օգտատերեր՝ վերջին 30 օր</b>", ""]
+    total = 0
+    for d in days:
+        c = counts.get(d, 0)
+        total += c
+        bar = "▇" * (max(1, round(c / mx * 12)) if c else 0)
+        lines.append(f"<code>{d.strftime('%d.%m')} {bar or '·'} {c}</code>")
+    lines.append("")
+    lines.append(f"Ընդամենը՝ <b>{total}</b>")
+    bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
+
+
+@bot.message_handler(commands=['ban'])
+def ban_cmd(message):
+    """Անջատում է օգտատիրոջ անհատական sub հղումը։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/ban USER_ID</code>")
+        return
+    uid = int(parts[1])
+    db_execute("UPDATE users SET banned = TRUE WHERE user_id = %s", (uid,), commit=True)
+    bot.send_message(ADMIN_ID, f"🚫 <code>{uid}</code> օգտատիրոջ sub հղումն անջատվեց")
+
+
+@bot.message_handler(commands=['unban'])
+def unban_cmd(message):
+    """Վերականգնում է օգտատիրոջ անհատական sub հղումը։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/unban USER_ID</code>")
+        return
+    uid = int(parts[1])
+    db_execute("UPDATE users SET banned = FALSE WHERE user_id = %s", (uid,), commit=True)
+    bot.send_message(ADMIN_ID, f"✅ <code>{uid}</code> օգտատիրոջ sub հղումը վերականգնվեց")
 
 
 def _do_broadcast(message):
@@ -1036,19 +1915,57 @@ def _do_broadcast(message):
             return
 
     users = db_execute("SELECT user_id FROM users", fetchall=True) or []
+    user_ids = [uid for (uid,) in users]
+    # Ուղարկումը կատարվում է background thread-ում, որպեսզի webhook request-ը
+    # չբլոկվի, timeout չլինի, ու Telegram-ը update-ը կրկնակի չուղարկի։
+    threading.Thread(
+        target=_broadcast_worker,
+        args=(user_ids, text, photo_id, video_id),
+        daemon=True,
+    ).start()
+    bot.send_message(ADMIN_ID, f"📤 Broadcast-ը սկսվեց՝ {len(user_ids)} օգտատեր։ Ավարտից հետո կստանաս հաշվետվություն։")
+
+
+def _broadcast_send(uid, text, photo_id, video_id):
+    if photo_id:
+        bot.send_photo(uid, photo_id, caption=text or None)
+    elif video_id:
+        bot.send_video(uid, video_id, caption=text or None)
+    else:
+        bot.send_message(uid, text)
+
+
+def _broadcast_worker(user_ids, text, photo_id=None, video_id=None):
     sent = 0
-    for (uid,) in users:
+    failed = 0
+    for uid in user_ids:
         try:
-            if photo_id:
-                bot.send_photo(uid, photo_id, caption=text or None)
-            elif video_id:
-                bot.send_video(uid, video_id, caption=text or None)
-            else:
-                bot.send_message(uid, text)
+            _broadcast_send(uid, text, photo_id, video_id)
             sent += 1
+        except ApiTelegramException as e:
+            # Rate limit (429)՝ սպասում ենք Telegram-ի ասած ժամանակը և կրկնում մեկ անգամ
+            if e.error_code == 429:
+                retry_after = 1
+                try:
+                    retry_after = int(e.result_json.get('parameters', {}).get('retry_after', 1))
+                except Exception:
+                    pass
+                time.sleep(retry_after + 1)
+                try:
+                    _broadcast_send(uid, text, photo_id, video_id)
+                    sent += 1
+                except Exception:
+                    failed += 1
+            else:
+                failed += 1
         except Exception:
-            continue
-    bot.send_message(ADMIN_ID, f"✅ Ուղարկված է {sent} օգտատերի")
+            failed += 1
+        # ~20 հաղորդագրություն/վայրկյան՝ Telegram-ի սահմանաչափից ցածր
+        time.sleep(0.05)
+    try:
+        bot.send_message(ADMIN_ID, f"✅ Broadcast-ն ավարտվեց՝ ուղարկված {sent}, ձախողված {failed}")
+    except Exception:
+        log.exception("broadcast summary failed")
 
 
 @bot.message_handler(commands=['broadcast'])
@@ -1108,7 +2025,7 @@ def get_content_cmd(message):
         bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /getcontent key")
         return
     if key not in CONTENT_DEFAULTS:
-        bot.send_message(ADMIN_ID, f"❌ Անհայտ key. Տես /listkeys")
+        bot.send_message(ADMIN_ID, f"❌ ��նհայտ key. Տես /listkeys")
         return
     hy_val = get_content(key, 'hy')
     ru_val = get_content(key, 'ru')
@@ -1248,7 +2165,7 @@ def add_button_cmd(message):
             "❌ Ֆորմատ (առանց hy_/ru_ prefix-ների, պարզապես 4 մաս | -ով).\n"
             "<code>/addbutton [կոճակի անունը հայերեն]|[կոճակի անունը ռուսերեն]|[պատասխանը հայերեն]|[պատասխանը ռուսերեն]</code>\n\n"
             "Օրինակ.\n"
-            "<code>/addbutton 🔒 Անվտանգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրա��ին WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
+            "<code>/addbutton 🔒 Անվ��անգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրա��ին WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
         )
         return
 
@@ -1284,7 +2201,7 @@ def remove_button_cmd(message):
         bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /removebutton ID (տես /listbuttons)")
         return
     db_execute("DELETE FROM custom_buttons WHERE id = %s", (button_id,), commit=True)
-    bot.send_message(ADMIN_ID, f"✅ Կոճակ {button_id} հեռացվեց։")
+    bot.send_message(ADMIN_ID, f"✅ Կոճակ {button_id} հ��ռացվեց։")
 
 
 # === ADMIN. SUB ֆայլի կառավարում GitHub-ի միջոցով ===
@@ -1519,7 +2436,7 @@ def clear_sub_cmd(message):
         types.InlineKeyboardButton("✅ Այո, ջնջել բոլորը", callback_data="confirm_clear_sub"),
         types.InlineKeyboardButton("❌ Չեղարկել", callback_data="cancel_clear_sub"),
     )
-    bot.send_message(ADMIN_ID, "⚠️ Դուք պատրաստվում եք ջնջել ԲՈԼՈՐ սերվերները։\nՀամոզվա՞ծ եք։", reply_markup=markup)
+    bot.send_message(ADMIN_ID, "⚠️ Դուք պատրաստվում եք ջնջել ԲՈԼՈՐ սերվ��ր��երը։\nՀամոզվա՞ծ եք։", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("confirm_clear_sub", "cancel_clear_sub"))
@@ -1574,7 +2491,7 @@ def is_menu_button(text):
     if not text:
         return False
     for key in MENU_BUTTON_KEYS:
-        if text == get_content(key, 'hy') or text == get_content(key, 'ru'):
+        if text in (get_content(key, 'hy'), get_content(key, 'ru'), get_content(key, 'en')):
             return True
     row = db_execute(
         "SELECT 1 FROM custom_buttons WHERE label_hy = %s OR label_ru = %s",
@@ -1599,7 +2516,7 @@ FAQ_SEARCH = [
               "Также проверьте, что вы всё ещё подписаны на канал։",
     },
     {
-        'keywords': ['ինչպես տեղադր', 'ինչպես ավելացն', 'ինչպես միացն', 'տեղադր', 'կարգավոր', 'ինստալ',
+        'keywords': ['ինչպե�� տեղադր', 'ինչպես ավելացն', 'ինչպես միացն', 'տեղադր', 'կարգավոր', 'ինստալ',
                      'как установ', 'как добав', 'как подключ', 'как настро', 'установить', 'инструкц'],
         'hy': "📖 Տեղադրման քայլ առ քայլ ցուցումների համար սեղմիր «📖 Ինչպես տեղադրել» կոճակը menu-ից։",
         'ru': "📖 Пошаговая инс��рукция по установке — нажмите кнопку «📖 Как установить» в меню։",
@@ -1607,13 +2524,13 @@ FAQ_SEARCH = [
     {
         'keywords': ['վճար', 'գին', 'արժ', 'ինչքան', 'փող', 'անվճար',
                      'платн', 'цен', 'стоит', 'сколько', 'деньг', 'бесплатн', 'о��лат'],
-        'hy': "💰 VPN-ը ներկայումս ամբողջությամբ անվճար է մեր ալիքի բաժանորդների համար։",
+        'hy': "💰 VPN-ը ներկ��յումս ամբողջությամբ անվճար է մեր ալիքի բաժանորդների համար։",
         'ru': "💰 VPN сейчас п��лностью бесплатный для подписчиков нашего канала։",
     },
     {
-        'keywords': ['հղում', 'ստանալ vpn', 'որտեղ vpn', 'sub', 'подписк', 'ссылк', 'получить vpn', 'где vpn'],
+        'keywords': ['հղո��մ', '��տանալ vpn', 'որտեղ vpn', 'sub', 'подписк', 'ссылк', 'получить vpn', 'где vpn'],
         'hy': "🔗 VPN հղումը ստանալու համար սեղմիր «🛡 Ստանալ VPN» կոճակը, բաժանորդագրվիր ալիքին, "
-              "և հղումը կո��ղարկվի ավտոմատ։",
+              "և հղումը կո��ղարկվի ավ��ոմատ։",
         'ru': "🔗 Чтобы получить VPN-ссылку, нажмите «🛡 Получить VPN», подпишитесь на канал — "
               "ссылка придёт автоматически։",
     },
@@ -1641,8 +2558,28 @@ def find_faq_answer(text, lang):
     return None
 
 
-# Ժամանակավոր պահոց՝ FAQ-ի ավտոպատասխանից հետո ադմինին փոխանցելու համար
-PENDING_SUPPORT_MSG = {}
+# Ժամանակավոր պահոց՝ FAQ-ի ավտոպատասխանից հետո ադմինին փոխանցելու համար։
+# Պահվում է DB-ում, որ gunicorn-ի մի քանի worker-ների դեպքում էլ աշխատի��
+def set_pending_support(user_id, from_user_id, username, chat_id, message_id):
+    db_execute(
+        "INSERT INTO pending_support (user_id, from_user_id, username, chat_id, message_id, ts) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET from_user_id = EXCLUDED.from_user_id, "
+        "username = EXCLUDED.username, chat_id = EXCLUDED.chat_id, "
+        "message_id = EXCLUDED.message_id, ts = EXCLUDED.ts",
+        (user_id, from_user_id, username, chat_id, message_id, time.time()), commit=True
+    )
+
+
+def pop_pending_support(user_id):
+    row = db_execute(
+        "SELECT from_user_id, username, chat_id, message_id, ts FROM pending_support WHERE user_id = %s",
+        (user_id,), fetchone=True
+    )
+    if not row:
+        return None
+    db_execute("DELETE FROM pending_support WHERE user_id = %s", (user_id,), commit=True)
+    return {'user_id': row[0], 'username': row[1], 'chat_id': row[2], 'message_id': row[3], 'ts': row[4]}
 
 
 # === ALL OTHER MESSAGES → FORWARDED TO ADMIN, with ID and profile link ===
@@ -1653,20 +2590,51 @@ def forward_to_admin(message):
     if is_menu_button(message.text):
         return
 
+    # ⭐ Feedback. եթե օգտատերը նոր է գնահատել, հաջորդ հաղորդագրությունը մեկնաբանություն է
+    if pop_pending_feedback(message.chat.id):
+        fb_lang = get_lang(message.chat.id)
+        comment = (message.text or "").strip()[:1000]
+        if comment:
+            db_execute(
+                "UPDATE feedback SET comment = %s, updated_at = now() WHERE user_id = %s",
+                (comment, message.chat.id), commit=True
+            )
+            fb_row = db_execute("SELECT rating FROM feedback WHERE user_id = %s",
+                                (message.chat.id,), fetchone=True)
+            fb_rating = fb_row[0] if fb_row and fb_row[0] else 0
+            fb_user = message.from_user
+            fb_username = f"@{fb_user.username}" if fb_user.username else "(username չկա)"
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"⭐ <b>Նոր feedback</b>\n"
+                    f"👤 ID: <code>{fb_user.id}</code> {fb_username}\n"
+                    f"Գնահատական՝ {'⭐' * fb_rating} ({fb_rating}/5)\n\n"
+                    f"💬 {fb_escape(comment)}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                log.exception("feedback notify failed")
+            bot.send_message(message.chat.id, tr(fb_lang,
+                "🙏 Շնորհակալություն, կարծիքդ փոխանցվեց ադմինին։",
+                "🙏 Спасибо, твой отзыв передан админу.",
+                "🙏 Thanks, your feedback was sent to the admin."))
+        return
+
     # Ավտոմատ FAQ որոնում. եթե գտնվի համապատասխան պատասխան, առաջարկում ենք այն
     # և ադմինին ուղարկում միայն օգտատիրոջ հատուկ խնդրանքով։
     lang = get_lang(message.chat.id)
     faq_answer = find_faq_answer(message.text, lang)
     if faq_answer:
-        PENDING_SUPPORT_MSG[message.chat.id] = {
-            'user_id': message.from_user.id,
-            'username': message.from_user.username,
-            'chat_id': message.chat.id,
-            'message_id': message.message_id,
-            'ts': time.time(),
-        }
-        intro = "💡 Հնարավոր է սա օգնի քո հարցին՝" if lang == 'hy' else "💡 Возможно, это ответит на ваш вопрос:"
-        btn = "🆘 Դեռ գրել ադմինին" if lang == 'hy' else "🆘 Всё равно написать в поддержку"
+        set_pending_support(
+            message.chat.id,
+            message.from_user.id,
+            message.from_user.username,
+            message.chat.id,
+            message.message_id,
+        )
+        intro = tr(lang, "💡 Հնարավոր է սա օգնի քո հարցին՝", "💡 Возможно, это ответит на ваш вопрос:", "💡 This might answer your question:")
+        btn = tr(lang, "🆘 Դեռ գրել ադմինին", "🆘 Всё равно написать в поддержку", "🆘 Contact support anyway")
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton(btn, callback_data="force_support"))
         bot.send_message(message.chat.id, f"{intro}\n\n{faq_answer}", reply_markup=markup)
@@ -1687,7 +2655,7 @@ def forward_to_admin(message):
         bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
         bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
     except Exception:
-        pass
+        log.exception("forward to admin failed")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "force_support")
@@ -1695,7 +2663,7 @@ def force_support(call):
     """Երբ FAQ-ը բավարար չէ՝ օգտատերը այս կոճակով կարող է հաղորդագրությունը ուղարկել ադմինին։"""
     lang = get_lang(call.from_user.id)
     bot.answer_callback_query(call.id)
-    pending = PENDING_SUPPORT_MSG.pop(call.from_user.id, None)
+    pending = pop_pending_support(call.from_user.id)
     try:
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
     except Exception:
@@ -1712,7 +2680,7 @@ def force_support(call):
         f"👤 <b>ID:</b> <code>{uid}</code>\n"
         f"👤 <b>Username:</b> {username}\n"
         f"🔗 <a href=\"{profile_link}\">Profile-ը բացել</a>\n\n"
-        f"↩️ Պատասխանելու համար. <code>/reply {uid} տեքստ</code>"
+        f"↩️ Պատասխանելու համար. <code>/reply {uid} ��եքստ</code>"
     )
     try:
         bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
@@ -1720,21 +2688,33 @@ def force_support(call):
         done = "✅ Ուղարկվեց ադմինին, շուտով կպատասխանեն։" if lang == 'hy' else "✅ Отправлено администратору, скоро ответят։"
         bot.send_message(call.from_user.id, done)
     except Exception:
-        pass
+        log.exception("force support forward failed")
 
 
 # === FLASK WEB APP + WEBHOOK ===
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
+    # Ստուգում ��նք, որ request-ը իսկապես Telegram-ից է (secret token)
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != WEBHOOK_SECRET:
+        abort(403)
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
+        # Ավտոմատ ողջույն՝ մինչ update-ի մշակումը
+        try:
+            msg = update.message
+            if msg and msg.from_user and not msg.from_user.is_bot and not (msg.text or '').startswith('/start'):
+                maybe_greet(msg.chat.id, msg.from_user.first_name or '')
+            # 🏅 Ամսվա չեմպիոնի ստուգում (ոչ ավելի հաճախ, քան 6 ժամը մեկ՝ ամեն worker-ի համար)
+            if time.time() - _CHAMP_CHECK_TS['ts'] > 21600:
+                _CHAMP_CHECK_TS['ts'] = time.time()
+                check_month_champion()
+        except Exception:
+            log.exception("greet hook failed")
         try:
             bot.process_new_updates([update])
         except Exception:
-            import traceback
-            print("‼️ ERROR while processing update:")
-            traceback.print_exc()
+            log.exception("ERROR while processing update")
         return '', 200
     else:
         abort(403)
@@ -1747,22 +2727,61 @@ def index():
     return 'VedaVPN bot is running ✅', 200
 
 
+# /sub-ի cache՝ GitHub-ից ամեն request-ի ժամանակ չբերելու համար
+_SUB_CACHE = {'content': None, 'ts': 0.0}
+_SUB_CACHE_TTL = 60  # seconds
+
+
 @app.route('/sub', methods=['GET'])
 def get_sub():
-    # Կարդալ sub ֆայլը և վերադարձնել որպես տեքստ
-    file_path = os.path.join(os.path.dirname(__file__), 'sub')
+    # Sub ֆայլը բոտը խմբագրում է GitHub-ում, ուստի կարդում ենք հենց GitHub-ից
+    # (կարճ cache-ով), այլ ոչ թե deploy-ի պահի հին լոկալ պատճենից։
+    now = time.time()
+    if _SUB_CACHE['content'] is not None and now - _SUB_CACHE['ts'] < _SUB_CACHE_TTL:
+        return _SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        repo, contents = get_sub_file_contents()
+        content = contents.decoded_content.decode('utf-8')
+        _SUB_CACHE['content'] = content
+        _SUB_CACHE['ts'] = now
         return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
-    except FileNotFoundError:
-        return "File not found", 404
+    except Exception:
+        log.exception("GitHub sub fetch failed")
+        # Fallback 1. հին cache
+        if _SUB_CACHE['content'] is not None:
+            return _SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
+        # Fallback 2. deploy-ի լոկալ ֆայլ (եթե կա)
+        file_path = os.path.join(os.path.dirname(__file__), 'sub')
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read(), 200, {'Content-Type': 'text/plain; charset=utf-8'}
+        except FileNotFoundError:
+            return "File not found", 404
+
+
+@app.route('/sub/<token>', methods=['GET'])
+def get_sub_personal(token):
+    """Անհատական sub հղում. նույն բովանդակությունն է, բայց per-user token-ով։
+    Թույլ է տալիս անջատել կոնկրետ օգտատիրոջ (/ban) և տեսնել՝ ով է իրականում օգտվում։"""
+    row = db_execute("SELECT user_id, banned FROM users WHERE sub_token = %s", (token,), fetchone=True)
+    if not row:
+        return "Not found", 404
+    if row[1]:
+        return "Subscription disabled", 403
+    try:
+        db_execute(
+            "UPDATE users SET sub_fetches = COALESCE(sub_fetches, 0) + 1, last_sub_at = now() WHERE user_id = %s",
+            (row[0],), commit=True
+        )
+    except Exception:
+        log.exception("sub fetch counter failed")
+    return get_sub()
 
 
 def setup_webhook():
     bot.remove_webhook()
     time.sleep(1)
-    bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member"])
+    bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member"], secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook-ը սահմանվեց՝ {WEBHOOK_URL}")
 
 
