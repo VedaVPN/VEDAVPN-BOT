@@ -3102,6 +3102,16 @@ def get_vip_sub():
     try:
         repo, contents = get_vip_sub_file_contents()
         content = contents.decoded_content.decode('utf-8')
+        # 👑 VIP օգտատերը ստանում են VIP + սովորական սերվերները միասին
+        try:
+            free_resp = get_sub()
+            if isinstance(free_resp, tuple) and free_resp[1] == 200:
+                free_lines = [l for l in free_resp[0].splitlines()
+                              if l.strip() and not l.strip().startswith('#')]
+                if free_lines:
+                    content = content.rstrip() + "\n" + "\n".join(free_lines) + "\n"
+        except Exception:
+            log.exception("append free sub to vip failed")
         _VIP_SUB_CACHE['content'] = content
         _VIP_SUB_CACHE['ts'] = now
         return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
