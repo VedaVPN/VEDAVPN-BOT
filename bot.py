@@ -2785,8 +2785,8 @@ def get_sub_personal(token):
 # Պարբերաբար ստուգում է sub ֆայլի բոլոր սերվերները (TCP connect),
 # և N անընդմեջ ձախողումից հետո ինքնաշխատ ջնջում է GitHub sub ֆայլից։
 # ============================================================
-SERVER_CHECK_INTERVAL = int(os.environ.get('SERVER_CHECK_INTERVAL', 900))   # վայրկյան, default 15 ր.
-MAX_FAILS_BEFORE_REMOVE = int(os.environ.get('MAX_FAILS_BEFORE_REMOVE', 3))  # անընդմեջ ձախողումների քանակ
+SERVER_CHECK_INTERVAL = int(os.environ.get('SERVER_CHECK_INTERVAL', 300))   # վայրկյան, default 15 ր.
+MAX_FAILS_BEFORE_REMOVE = int(os.environ.get('MAX_FAILS_BEFORE_REMOVE', 1))  # անընդմեջ ձախողումների քանակ
 SERVER_CHECK_TIMEOUT = int(os.environ.get('SERVER_CHECK_TIMEOUT', 5))       # TCP connect timeout վրկ
 
 _server_fail_counts = {}  # line -> fail count (in-memory, մաքրվում է restart-ի ժամանակ)
