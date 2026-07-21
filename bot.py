@@ -34,6 +34,8 @@ VPN_LINK_DEFAULT = "https://pastebin.com/raw/քո_նոր_հղումը_այստե
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
 GITHUB_REPO = os.environ.get('GITHUB_REPO', 'VedaVPN/VEDAVPN-BOT')
 GITHUB_SUB_PATH = os.environ.get('GITHUB_SUB_PATH', 'sub')
+# 👑 VIP սերվերների առանձին sub ֆայլը GitHub-ում
+GITHUB_VIP_SUB_PATH = os.environ.get('GITHUB_VIP_SUB_PATH', 'sub_vip')
 
 
 def get_sub_file_contents():
@@ -41,6 +43,13 @@ def get_sub_file_contents():
     g = Github(GITHUB_TOKEN)
     repo = g.get_repo(GITHUB_REPO)
     return repo, repo.get_contents(GITHUB_SUB_PATH)
+
+
+def get_vip_sub_file_contents():
+    """👑 VIP sub ֆայլի contents օբյեկտը GitHub-ից։"""
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(GITHUB_REPO)
+    return repo, repo.get_contents(GITHUB_VIP_SUB_PATH)
 
 # Supabase PostgreSQL connection string (Project Settings → Database → Connection string → URI)
 SUPABASE_URL = os.environ.get(
@@ -184,6 +193,42 @@ def init_db():
                  text TEXT,
                  photo_id TEXT,
                  video_id TEXT)''', commit=True)
+    # 👑 VIP բաժանորդագրություն (Telegram Stars)
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_until TIMESTAMP", commit=True)
+    # Stars վճարումների log՝ refund-ների և հաշվետվության համար
+    db_execute('''CREATE TABLE IF NOT EXISTS payments
+                (id BIGSERIAL PRIMARY KEY,
+                 user_id BIGINT,
+                 plan TEXT,
+                 stars INTEGER,
+                 charge_id TEXT,
+                 ts TIMESTAMP DEFAULT now())''', commit=True)
+
+
+# === 👑 VIP ԲԱԺԱՆՈՐԴԱԳՐՈՒԹՅՈՒՆ (Telegram Stars) ===
+VIP_PLANS = {
+    'vip_31': {'days': 31, 'stars': 50,
+               'hy': "👑 VIP · 1 ամիս", 'ru': "👑 VIP · 1 месяц", 'en': "👑 VIP · 1 month"},
+}
+
+
+def get_vip_until(user_id):
+    row = db_execute("SELECT vip_until FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    return row[0] if row and row[0] else None
+
+
+def is_vip(user_id):
+    until = get_vip_until(user_id)
+    return bool(until and until > datetime.utcnow())
+
+
+def grant_vip_days(user_id, days):
+    """Տալիս/երկարացնում է VIP-ը. եթե ակտիվ է՝ գումարվում է վերջին, ոչ թե զրոյից։"""
+    current = get_vip_until(user_id)
+    base = current if current and current > datetime.utcnow() else datetime.utcnow()
+    new_until = base + timedelta(days=days)
+    db_execute("UPDATE users SET vip_until = %s WHERE user_id = %s", (new_until, user_id), commit=True)
+    return new_until
 
 
 # === CONTENT (bilingual texts, editable by the admin) ===
@@ -684,6 +729,9 @@ def build_main_menu_inline(lang):
     for btn_id, label_hy, label_ru in custom:
         markup.add(types.InlineKeyboardButton(label_hy if lang == 'hy' else label_ru,
                                               callback_data=f"menu_cbtn_{btn_id}"))
+    markup.add(types.InlineKeyboardButton(
+        tr(lang, "👑 VIP բաժանորդագրություն", "👑 VIP подписка", "👑 VIP subscription"),
+        callback_data="menu_vip"))
     markup.add(types.InlineKeyboardButton(
         tr(lang, "⭐ Գնահատիր բոտը", "⭐ Оцени бота", "⭐ Rate the bot"),
         callback_data="menu_rate"))
@@ -1446,7 +1494,7 @@ def sec_support(chat_id, lang, message_id=None):
               "🛠 Please indicate the issue you are facing so we can resolve it quickly.")
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "🔴 Can't connect"), callback_data="wizard_connect"),
+        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "���� Can't connect"), callback_data="wizard_connect"),
         types.InlineKeyboardButton(tr(lang, "🐢 Ցածր արագություն", "🐢 Низкая скорость", "🐢 Low speed"), callback_data="wizard_speed"),
         types.InlineKeyboardButton(tr(lang, "✍️ Այլ հարց (Գրել Ադմինին)", "✍️ Другой вопрос (Админу)", "✍️ Other (Contact Admin)"), callback_data="wizard_admin"),
         types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
@@ -1721,7 +1769,7 @@ def sec_reviews(chat_id, lang, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
 def rate_callback(call):
-    """Աստղի սեղմում. պահպանում ենք գնահատականը և առաջարկում մեկնաբանություն թողնել։"""
+    """Աստղի սեղմում. պա��պանում ենք գնահատականը և առաջարկում մեկնաբանություն թողնել։"""
     lang = get_lang(call.from_user.id)
     try:
         rating = max(1, min(5, int(call.data[5:])))
@@ -1748,6 +1796,97 @@ def rate_callback(call):
                  build_nav_markup(lang, back_callback="menu_rate"))
 
 
+# ============================================================
+# 👑 VIP ԲԱԺԻՆ, INVOICE ԵՎ ՎՃԱՐՈՒՄՆԵՐԻ ՄՇԱԿՈՒՄ (Telegram Stars)
+# ============================================================
+def sec_vip(chat_id, lang, message_id=None):
+    """👑 VIP բաժինը՝ պլանով ու գնով, in-place նավիգացիայով։"""
+    title = tr(lang, "VIP բաժանորդագրություն", "VIP подписка", "VIP subscription")
+    if is_vip(chat_id):
+        until = get_vip_until(chat_id).strftime('%d.%m.%Y')
+        body = tr(lang,
+                  f"👑 VIP-դ ակտիվ է մինչև <b>{until}</b>։\n\n🚀 Արագ VIP սերվերներ\n🛠 Առաջնահերթ աջակցություն\n\nԿարող ես երկարացնել 👇",
+                  f"👑 Твой VIP активен до <b>{until}</b>.\n\n🚀 Быстрые VIP-серверы\n🛠 Приоритетная поддержка\n\nМожешь продлить 👇",
+                  f"👑 Your VIP is active until <b>{until}</b>.\n\n🚀 Fast VIP servers\n🛠 Priority support\n\nYou can extend it 👇")
+    else:
+        body = tr(lang,
+                  "🚀 Ավելի արագ VIP սերվերներ\n🛠 Առաջնահերթ աջակցություն\n🔗 Հղումդ մնում է նույնը՝ վճարումից հետո պարզապես թարմացրու սերվերների ցանկը հավելվածում։\n\nՎճարումը՝ Telegram Stars ⭐-ով 👇",
+                  "🚀 Более быстрые VIP-серверы\n🛠 Приоритетная поддержка\n🔗 Ссылка остаётся той же — после оплаты просто обнови список серверов в приложении.\n\nОплата в Telegram Stars ⭐ 👇",
+                  "🚀 Faster VIP servers\n🛠 Priority support\n🔗 Your link stays the same — after payment just refresh the server list in the app.\n\nPayment in Telegram Stars ⭐ 👇")
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for plan_key, plan in VIP_PLANS.items():
+        label = f"{plan.get(lang, plan['ru'])} — {plan['stars']} ⭐"
+        markup.add(types.InlineKeyboardButton(label, callback_data=f"buyvip_{plan_key}"))
+    markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+    edit_or_send(chat_id, message_id, card(title, body), markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buyvip_"))
+def buy_vip(call):
+    """Ուղարկում է Stars invoice ընտրված պլանի համար։"""
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    plan_key = call.data[7:]
+    plan = VIP_PLANS.get(plan_key)
+    if not plan:
+        return
+    bot.send_invoice(
+        call.message.chat.id,
+        title=plan.get(lang, plan['ru']),
+        description=tr(lang,
+                       "VedaVPN VIP՝ արագ սերվերներ և առաջնահերթ աջակցություն",
+                       "VedaVPN VIP: быстрые серверы и приоритетная поддержка",
+                       "VedaVPN VIP: fast servers and priority support"),
+        invoice_payload=plan_key,
+        provider_token="",  # Telegram Stars-ի դեպքում միշտ դատարկ
+        currency="XTR",
+        prices=[types.LabeledPrice(label=plan.get(lang, plan['ru']), amount=plan['stars'])],
+    )
+
+
+@bot.pre_checkout_query_handler(func=lambda q: True)
+def pre_checkout(q):
+    bot.answer_pre_checkout_query(q.id, ok=True)
+
+
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    """Հաջող Stars վճարում. ակտիվացնում/երկարացնում ենք VIP-ը։"""
+    sp = message.successful_payment
+    plan = VIP_PLANS.get(sp.invoice_payload)
+    if not plan:
+        return
+    uid = message.chat.id
+    lang = get_lang(uid)
+    new_until = grant_vip_days(uid, plan['days'])
+    db_execute("INSERT INTO payments (user_id, plan, stars, charge_id) VALUES (%s, %s, %s, %s)",
+               (uid, sp.invoice_payload, plan['stars'], sp.telegram_payment_charge_id), commit=True)
+    bot.send_message(uid, tr(lang,
+        f"👑 Շնորհակալություն! VIP-ը ակտիվ է մինչև <b>{new_until.strftime('%d.%m.%Y')}</b>։\nՀղումդ նույնն է՝ պարզապես թարմացրու (Update) սերվերների ցանկը հավելվածում։",
+        f"👑 Спасибо! VIP активен до <b>{new_until.strftime('%d.%m.%Y')}</b>.\nСсылка та же — просто обнови список серверов в приложении.",
+        f"👑 Thank you! VIP is active until <b>{new_until.strftime('%d.%m.%Y')}</b>.\nSame link — just refresh the server list in the app."))
+    try:
+        bot.send_message(ADMIN_ID,
+                         f"💰 Նոր VIP վճարում՝ <code>{uid}</code>, {sp.invoice_payload}, {plan['stars']} ⭐")
+    except Exception:
+        pass
+
+
+def daily_vip_check():
+    """⏳ Ամեն օր հիշեցնում է, ում VIP-ը լրանում է առաջիկա 3 օրում։"""
+    rows = db_execute(
+        "SELECT user_id, lang, vip_until FROM users "
+        "WHERE vip_until BETWEEN now() AND now() + INTERVAL '3 days'", fetchall=True) or []
+    for uid, lang, until in rows:
+        try:
+            bot.send_message(uid, tr(lang,
+                f"⏳ VIP-դ լրանում է {until.strftime('%d.%m.%Y')}-ին։ Երկարացրու «👑 VIP» բաժնից 😉",
+                f"⏳ Твой VIP истекает {until.strftime('%d.%m.%Y')}. Продли в разделе «👑 VIP» 😉",
+                f"⏳ Your VIP expires on {until.strftime('%d.%m.%Y')}. Extend it in the «👑 VIP» section 😉"))
+        except Exception:
+            pass
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def go_main_menu(call):
     """Ցանկացած inline բաժնից վերադարձ գլխավոր մենյու՝ in-place։"""
@@ -1767,7 +1906,7 @@ def menu_router(call):
     sections = {
         "vpn": sec_vpn, "refs": sec_refs, "howto": sec_howto, "faq": sec_faq,
         "support": sec_support, "forum": sec_forum, "iptv": sec_iptv, "info": sec_info,
-        "rate": sec_rate, "reviews": sec_reviews,
+        "rate": sec_rate, "reviews": sec_reviews, "vip": sec_vip,
     }
     if key in sections:
         sections[key](chat_id, lang, mid)
@@ -1863,6 +2002,9 @@ def admin_panel(message):
         f"/export — օգտատերերի ցուցակը CSV ֆայլով 📁\n"
         f"/ban ID — անջատել օգտատիրոջ sub հղումը 🚫\n"
         f"/unban ID — վերականգնել օգտատիրոջ sub հղումը ✅\n"
+        f"/vip ID DAYS — VIP տալ/երկարացնել 👑\n"
+        f"/unvip ID — հանել VIP-ը ❌\n"
+        f"/refund ID — վերադարձնել վերջին Stars վճարումը 💫\n"
         f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
         f"/reply ID տեքստ — պատասխանել user-ի\n"
         f"/listkeys — ��ույց տալ բոլոր editable content key-ները\n"
@@ -1904,6 +2046,7 @@ def stats_cmd(message):
     ru = scalar("SELECT COUNT(*) FROM users WHERE lang = 'ru'")
     en = scalar("SELECT COUNT(*) FROM users WHERE lang = 'en'")
     banned_cnt = scalar("SELECT COUNT(*) FROM users WHERE banned")
+    vip_cnt = scalar("SELECT COUNT(*) FROM users WHERE vip_until > now()")
     android = scalar("SELECT COUNT(*) FROM users WHERE device = 'android'")
     ios = scalar("SELECT COUNT(*) FROM users WHERE device = 'ios'")
     total_refs = scalar("SELECT COALESCE(SUM(ref_count), 0) FROM users")
@@ -1933,6 +2076,7 @@ def stats_cmd(message):
         "",
         f"🔗 Ընդհանուր ռեֆերալներ՝ <b>{total_refs}</b>",
         f"🚫 Անջատված sub հղումներ՝ <b>{banned_cnt}</b>",
+        f"👑 Ակտիվ VIP բաժանորդներ՝ <b>{vip_cnt}</b>",
     ]
     if top:
         lines.append("")
@@ -2016,6 +2160,56 @@ def unban_cmd(message):
     uid = int(parts[1])
     db_execute("UPDATE users SET banned = FALSE WHERE user_id = %s", (uid,), commit=True)
     bot.send_message(ADMIN_ID, f"✅ <code>{uid}</code> օգտատիրոջ sub հղումը վերականգնվեց")
+
+
+@bot.message_handler(commands=['vip'])
+def vip_cmd(message):
+    """/vip USER_ID DAYS — ձեռքով VIP տալ/երկարացնել (նվեր, փոխհատուցում և այլն)։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/vip USER_ID DAYS</code>")
+        return
+    uid, days = int(parts[1]), int(parts[2])
+    new_until = grant_vip_days(uid, days)
+    bot.send_message(ADMIN_ID, f"👑 <code>{uid}</code> → VIP մինչև {new_until.strftime('%d.%m.%Y')}")
+
+
+@bot.message_handler(commands=['unvip'])
+def unvip_cmd(message):
+    """/unvip USER_ID — հանում է VIP-ը։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/unvip USER_ID</code>")
+        return
+    db_execute("UPDATE users SET vip_until = NULL WHERE user_id = %s", (int(parts[1]),), commit=True)
+    bot.send_message(ADMIN_ID, "✅ VIP-ը հանվեց")
+
+
+@bot.message_handler(commands=['refund'])
+def refund_cmd(message):
+    """/refund USER_ID — վերադարձնում է վերջին Stars վճարումը և հանում VIP-ը։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/refund USER_ID</code>")
+        return
+    uid = int(parts[1])
+    row = db_execute("SELECT charge_id FROM payments WHERE user_id = %s ORDER BY ts DESC LIMIT 1",
+                     (uid,), fetchone=True)
+    if not row or not row[0]:
+        bot.send_message(ADMIN_ID, "❌ Այդ user-ի վճարում չգտնվեց")
+        return
+    try:
+        bot.refund_star_payment(uid, row[0])
+        db_execute("UPDATE users SET vip_until = NULL WHERE user_id = %s", (uid,), commit=True)
+        bot.send_message(ADMIN_ID, "✅ Refund կատարվեց, VIP-ը հանվեց")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Refund չստացվեց՝ {e}")
 
 
 def _do_broadcast(message):
@@ -2230,7 +2424,7 @@ def set_forum_cmd(message):
     try:
         new_link = message.text.split(maxsplit=1)[1].strip()
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setforum նոր_հղում")
+        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setforum նոր_հղ��ւմ")
         return
     set_config('forum_link', new_link)
     bot.send_message(ADMIN_ID, f"✅ Forum հղումը թարմացվեց.\n<code>{new_link}</code>")
@@ -2643,7 +2837,7 @@ def is_menu_button(text):
 FAQ_SEARCH = [
     {
         'keywords': ['չի աշխատ', 'չաշխատ', 'չի միանում', 'չի բացվում', 'error', 'սխալ',
-                     'проблем', 'не работает', 'не подключ', 'не открыв', 'ошибк', 'глючит', 'тормоз'],
+                     'проблем', 'не работает', 'не подключ', 'не открыв', 'оши��к', 'глючит', 'тормоз'],
         'hy': "🔧 Եթե VPN-ը չի աշխատում՝ փորձիր ընտրել այլ սերվեր հավելվածում (Happ/INCY)։ "
               "Հաճախ մեկ սերվերը կարող է ժամանակավորապես անհասանելի լինել, իսկ մյուսները՝ աշխատել։ "
               "Նաև ստուգիր, որ դեռ բաժանորդագրված ես ալիքին։",
@@ -2895,6 +3089,29 @@ def get_sub():
             return "File not found", 404
 
 
+# VIP sub-ի cache՝ GitHub-ից ամեն request-ի ժամանակ չբերելու համար
+_VIP_SUB_CACHE = {'content': None, 'ts': 0.0}
+
+
+def get_vip_sub():
+    """👑 VIP sub ֆայլի պարունակությունը GitHub-ից (կարճ cache-ով)։
+    Եթե VIP ֆայլը բերել չհաջողվի՝ fallback հին cache-ին կամ սովորական sub-ին։"""
+    now = time.time()
+    if _VIP_SUB_CACHE['content'] is not None and now - _VIP_SUB_CACHE['ts'] < _SUB_CACHE_TTL:
+        return _VIP_SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    try:
+        repo, contents = get_vip_sub_file_contents()
+        content = contents.decoded_content.decode('utf-8')
+        _VIP_SUB_CACHE['content'] = content
+        _VIP_SUB_CACHE['ts'] = now
+        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception:
+        log.exception("GitHub vip sub fetch failed")
+        if _VIP_SUB_CACHE['content'] is not None:
+            return _VIP_SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
+        return get_sub()
+
+
 @app.route('/sub/<token>', methods=['GET'])
 def get_sub_personal(token):
     """Անհատական sub հղում. նույն բովանդակությունն է, բայց per-user token-ով։
@@ -2911,6 +3128,9 @@ def get_sub_personal(token):
         )
     except Exception:
         log.exception("sub fetch counter failed")
+    # 👑 VIP օգտատերերը նույն հղումով ստանում են VIP սերվերները
+    if is_vip(row[0]):
+        return get_vip_sub()
     return get_sub()
 
 
@@ -3059,7 +3279,7 @@ def start_server_health_check():
 def setup_webhook():
     bot.remove_webhook()
     time.sleep(1)
-    bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member"], secret_token=WEBHOOK_SECRET)
+    bot.set_webhook(url=WEBHOOK_URL, allowed_updates=["message", "callback_query", "chat_member", "pre_checkout_query"], secret_token=WEBHOOK_SECRET)
     print(f"✅ Webhook-ը սահմանվեց՝ {WEBHOOK_URL}")
 
 
@@ -3070,6 +3290,7 @@ def start_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(check_month_champion, 'cron', day=1, hour=0, minute=5)
     scheduler.add_job(daily_birthday_check, 'cron', hour=10, minute=0)
+    scheduler.add_job(daily_vip_check, 'cron', hour=12, minute=0)
     scheduler.start()
     log.info("APScheduler started (champion: 1st of month 00:05, birthdays: daily 10:00, both in server-local/UTC time).")
 
