@@ -8,7 +8,8 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from io import BytesIO
-from urllib.parse import unquote, quote
+import socket
+from urllib.parse import unquote, quote, urlparse
 
 import psycopg2
 import psycopg2.pool
@@ -2778,6 +2779,124 @@ def get_sub_personal(token):
     return get_sub()
 
 
+
+# ============================================================
+# AUTOMATIC SERVER HEALTH CHECK
+# Պարբերաբար ստուգում է sub ֆայլի բոլոր սերվերները (TCP connect),
+# և N անընդմեջ ձախողումից հետո ինքնաշխատ ջնջում է GitHub sub ֆայլից։
+# ============================================================
+SERVER_CHECK_INTERVAL = int(os.environ.get('SERVER_CHECK_INTERVAL', 900))   # վայրկյան, default 15 ր.
+MAX_FAILS_BEFORE_REMOVE = int(os.environ.get('MAX_FAILS_BEFORE_REMOVE', 3))  # անընդմեջ ձախողումների քանակ
+SERVER_CHECK_TIMEOUT = int(os.environ.get('SERVER_CHECK_TIMEOUT', 5))       # TCP connect timeout վրկ
+
+_server_fail_counts = {}  # line -> fail count (in-memory, մաքրվում է restart-ի ժամանակ)
+
+
+def extract_host_port(line):
+    """VLESS/VMESS/SS/Trojan/SSR URI-ից քաշում է (host, port)։"""
+    try:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            return None, None
+        if line.startswith('vmess://'):
+            import base64
+            import json
+            raw = line[len('vmess://'):].split('#')[0]
+            padded = raw + '=' * (-len(raw) % 4)
+            data = json.loads(base64.b64decode(padded).decode('utf-8', 'ignore'))
+            host = data.get('add')
+            port = int(data.get('port')) if data.get('port') else None
+            return host, port
+        parsed = urlparse(line)
+        return parsed.hostname, parsed.port
+    except Exception:
+        return None, None
+
+
+def check_server_alive(host, port):
+    """Փորձում է TCP միացում հաստատել host:port-ի հետ։"""
+    if not host or not port:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=SERVER_CHECK_TIMEOUT):
+            return True
+    except Exception:
+        return False
+
+
+def check_all_servers():
+    """Ստուգում է sub ֆայլի բոլոր տողերը, և ինքնաշխատ ջնջում է
+    այն սերվերները, որոնք MAX_FAILS_BEFORE_REMOVE անընդմեջ ստուգումներում
+    անհասանելի են եղել։"""
+    try:
+        repo, contents = get_sub_file_contents()
+        lines = contents.decoded_content.decode('utf-8').split('\n')
+    except Exception:
+        log.exception("check_all_servers: sub ֆայլը բեռնել չհաջողվեց")
+        return
+
+    to_remove = []
+    still_seen = set()
+
+    for line in lines:
+        if not line.strip() or line.startswith('#'):
+            continue
+        still_seen.add(line)
+        host, port = extract_host_port(line)
+        alive = check_server_alive(host, port)
+        if alive:
+            _server_fail_counts.pop(line, None)
+        else:
+            _server_fail_counts[line] = _server_fail_counts.get(line, 0) + 1
+            if _server_fail_counts[line] >= MAX_FAILS_BEFORE_REMOVE:
+                to_remove.append(line)
+
+    # մաքրում ենք հետքերը այն տողերի համար, որոնք արդեն ֆայլում չկան
+    for key in list(_server_fail_counts.keys()):
+        if key not in still_seen:
+            _server_fail_counts.pop(key, None)
+
+    if not to_remove:
+        return
+
+    try:
+        new_lines = [l for l in lines if l not in to_remove]
+        new_content_str = '\n'.join(new_lines)
+        repo.update_file(
+            contents.path,
+            f"Auto-removed {len(to_remove)} dead server(s)",
+            new_content_str,
+            contents.sha,
+        )
+        for line in to_remove:
+            _server_fail_counts.pop(line, None)
+            name, protocol = extract_server_name(line)
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ Ավտոմատ ջնջվեց ոչ աշխատող սերվեր՝ {protocol or 'UNKNOWN'} {name or line[:50]}"
+                )
+            except Exception:
+                log.exception("Չհաջողվեց ադմինին ծանուցել ջնջված սերվերի մասին")
+    except Exception:
+        log.exception("check_all_servers: sub ֆայլը թարմացնել չհաջողվեց")
+
+
+def _server_check_loop():
+    while True:
+        try:
+            check_all_servers()
+        except Exception:
+            log.exception("_server_check_loop crashed")
+        time.sleep(SERVER_CHECK_INTERVAL)
+
+
+def start_server_health_check():
+    """Առանձին daemon թրեդում գործարկում է սերվերների պարբերական ստուգումը։"""
+    threading.Thread(target=_server_check_loop, daemon=True).start()
+    log.info(f"Server health-check started (interval={SERVER_CHECK_INTERVAL}s, max_fails={MAX_FAILS_BEFORE_REMOVE})")
+
+
 def setup_webhook():
     bot.remove_webhook()
     time.sleep(1)
@@ -2790,6 +2909,7 @@ def setup_webhook():
 # directly).
 init_db()
 setup_webhook()
+start_server_health_check()
 
 
 if __name__ == '__main__':
