@@ -19,6 +19,7 @@ from telebot import types
 from telebot.apihelper import ApiTelegramException
 from flask import Flask, request, abort
 from github import Github
+from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("vedavpn")
@@ -176,6 +177,13 @@ def init_db():
     db_execute('''CREATE TABLE IF NOT EXISTS pending_feedback
                 (user_id BIGINT PRIMARY KEY,
                  ts DOUBLE PRECISION)''', commit=True)
+    # Broadcast-ի հերթը՝ DB-ում (ոչ միայն հիշողությունում), որպեսզի Render-ի
+    # restart/sleep-ի դեպքում էլ չկորչի կիսատ մնացած broadcast-ը։
+    db_execute('''CREATE TABLE IF NOT EXISTS broadcast_queue
+                (user_id BIGINT PRIMARY KEY,
+                 text TEXT,
+                 photo_id TEXT,
+                 video_id TEXT)''', commit=True)
 
 
 # === CONTENT (bilingual texts, editable by the admin) ===
@@ -192,6 +200,30 @@ CONTENT_DEFAULTS = {
     'btn_privacy':   {'hy': "🔒 Գաղտնիության քաղաքականություն", 'ru': "🔒 Политика конфиденциальности"},
     'btn_back':      {'hy': "⬅️ Հետ", 'ru': "⬅️ Назад"},
     'btn_main_menu': {'hy': "🏠 Գլխավոր մենյու", 'ru': "🏠 Главное меню"},
+    'btn_adblock':   {'hy': "🛡 Առանց Գովազդի", 'ru': "🛡 Без рекламы"},
+
+    'text_adblock': {
+        'hy': (
+            "🛡 <b>Առանց Գովազդի (AdBlock)</b>\n\n"
+            "Վեբ-կայքերում և խաղերում գովազդներից ընդմիշտ ազատվելու համար, փոխեք DNS կարգավորումները Ձեր VPN հավելվածում.\n\n"
+            "<b>📱 Happ կամ INCY հավելվածներում.</b>\n"
+            "1. Բացեք հավելվածի կարգավորումները (Settings)\n"
+            "2. Գտեք <b>Custom DNS</b> կամ <b>DNS</b> բաժինը\n"
+            "3. Միացրեք այն և մուտքագրեք հետևյալ IP հասցեն՝\n"
+            "<code>94.140.14.14</code>\n\n"
+            "✅ Պահպանեք և վերամիացեք VPN-ին: Գովազդներն այլևս չեն խանգարի Ձեզ!"
+        ),
+        'ru': (
+            "🛡 <b>Без рекламы (AdBlock)</b>\n\n"
+            "Чтобы навсегда избавиться от рекламы на сайтах и в играх, измените настройки DNS в вашем VPN-приложении.\n\n"
+            "<b>📱 В приложениях Happ или INCY:</b>\n"
+            "1. Откройте настройки (Settings) приложения\n"
+            "2. Найдите раздел <b>Custom DNS</b> или <b>DNS</b>\n"
+            "3. Включите его и введите следующий IP-адрес:\n"
+            "<code>94.140.14.14</code>\n\n"
+            "✅ Сохраните и переподключите VPN. Реклама больше не будет вас беспокоить!"
+        ),
+    },
 
     'text_choose_lang': {
         'hy': "🌍 Ընտրեք լեզուն / Выберите язык:",
@@ -419,6 +451,17 @@ CONTENT_EN = {
     'btn_terms':     "📄 Terms of Use",
     'btn_privacy':   "🔒 Privacy Policy",
     'btn_back':      "⬅️ Back",
+    'btn_adblock':   "🛡 AdBlock",
+    'text_adblock': (
+        "🛡 <b>AdBlock</b>\n\n"
+        "To get rid of ads on websites and in games forever, change the DNS settings in your VPN app.\n\n"
+        "<b>📱 In Happ or INCY apps:</b>\n"
+        "1. Open the app settings (Settings)\n"
+        "2. Find the <b>Custom DNS</b> or <b>DNS</b> section\n"
+        "3. Enable it and enter the following IP address:\n"
+        "<code>94.140.14.14</code>\n\n"
+        "✅ Save and reconnect to the VPN. Ads will no longer bother you!"
+    ),
     'btn_main_menu': "🏠 Main menu",
     'text_choose_lang': "🌍 Ընտրեք լեզուն / Выберите язык / Choose language:",
     'text_subscribe_warn': "⚠️ Please subscribe to the channel and press the check button:",
@@ -672,6 +715,9 @@ def build_main_menu_inline(lang):
         types.InlineKeyboardButton(get_content('btn_iptv', lang), callback_data="menu_iptv"),
         types.InlineKeyboardButton(get_content('btn_info', lang), callback_data="menu_info"),
     )
+    markup.add(
+        types.InlineKeyboardButton(get_content('btn_adblock', lang), callback_data="menu_adblock"),
+    )
     custom = db_execute("SELECT id, label_hy, label_ru FROM custom_buttons", fetchall=True) or []
     for btn_id, label_hy, label_ru in custom:
         markup.add(types.InlineKeyboardButton(label_hy if lang == 'hy' else label_ru,
@@ -859,6 +905,28 @@ def maybe_birthday(user_id, lang, first_name=""):
         bot.send_message(user_id, msg)
     except Exception:
         pass
+
+
+def daily_birthday_check():
+    """🎂 Scheduler-ով, ամեն օր ֆիքսված ժամին, ստուգում է ԲՈԼՈՐ օգտատերերին մեկ անգամից՝
+    այնպես որ նույնիսկ ով այդ օրը բոտ չի մտնում, դեռ կստանա շնորհավորանքը (ի տարբերություն
+    maybe_birthday-ի, որը գործարկվում է միայն օգտատիրոջ ակտիվության պահին)։"""
+    local_now = datetime.utcnow() + timedelta(hours=TZ_OFFSET_HOURS)
+    today_str = local_now.strftime('%d.%m')
+    curr_year = local_now.year
+    rows = db_execute(
+        "SELECT user_id, lang FROM users WHERE birthday = %s AND (bday_greeted_year IS NULL OR bday_greeted_year < %s)",
+        (today_str, curr_year), fetchall=True) or []
+    for uid, lang in rows:
+        try:
+            db_execute("UPDATE users SET bday_greeted_year = %s WHERE user_id = %s", (curr_year, uid), commit=True)
+            msg = tr(lang,
+                     "🎂🎉 Ծնունդդ շնորհավոր! Թող ինտերնետդ միշտ արագ լինի, իսկ կապը՝ անխափան 🥳 VedaVPN-ի թիմից 💙",
+                     "🎂🎉 С днём рождения! Пусть интернет всегда будет быстрым, а соединение — стабильным 🥳 Команда VedaVPN 💙",
+                     "🎂🎉 Happy birthday! May your internet always be fast and your connection rock-solid 🥳 From the VedaVPN team 💙")
+            bot.send_message(uid, msg)
+        except Exception:
+            log.exception(f"Failed to send birthday wish to {uid}")
 
 
 _CHAMP_CHECK_TS = {'ts': 0.0}
@@ -1405,9 +1473,34 @@ def iptv(message):
     sec_iptv(message.chat.id, lang)
 
 
-# === SUPPORT ===
+# === ADBLOCK ===
+def sec_adblock(chat_id, lang, message_id=None):
+    edit_or_send(chat_id, message_id, card(get_content('btn_adblock', lang), get_content('text_adblock', lang)), build_nav_markup(lang))
+
+
+@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_adblock'))
+def adblock_menu(message):
+    lang = get_lang(message.chat.id)
+    show_typing(message.chat.id)
+    hide_main_menu(message.chat.id)
+    sec_adblock(message.chat.id, lang)
+
+
+# === SUPPORT (wizard-style self-help before reaching the admin) ===
 def sec_support(chat_id, lang, message_id=None):
-    edit_or_send(chat_id, message_id, card(get_content('btn_support', lang), get_content('text_support_prompt', lang)), build_nav_markup(lang))
+    title = tr(lang, "Խելացի Օգնական 🤖", "Умный Помощник 🤖", "Smart Assistant 🤖")
+    body = tr(lang,
+              "🛠 Խնդրում ենք նշել, թե ինչ խնդրի եք բախվել, որպեսզի արագ լուծենք այն.",
+              "🛠 Пожалуйста, укажите, с какой проблемой вы столкнулись, чтобы мы могли быстро её решить.",
+              "🛠 Please indicate the issue you are facing so we can resolve it quickly.")
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "🔴 Can't connect"), callback_data="wizard_connect"),
+        types.InlineKeyboardButton(tr(lang, "🐢 Ցածր արագություն", "🐢 Низкая скорость", "🐢 Low speed"), callback_data="wizard_speed"),
+        types.InlineKeyboardButton(tr(lang, "✍️ Այլ հարց (Գրել Ադմինին)", "✍️ Другой вопрос (Админу)", "✍️ Other (Contact Admin)"), callback_data="wizard_admin"),
+        types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
+    )
+    edit_or_send(chat_id, message_id, card(title, body), markup)
 
 
 @bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_support'))
@@ -1416,6 +1509,88 @@ def support(message):
     show_typing(message.chat.id)
     hide_main_menu(message.chat.id)
     sec_support(message.chat.id, lang)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("wizard_"))
+def wizard_router(call):
+    lang = get_lang(call.from_user.id)
+    bot.answer_callback_query(call.id)
+    action = call.data.split('_')[1]
+    chat_id = call.message.chat.id
+    mid = call.message.message_id
+    title = tr(lang, "Խելացի Օգնական 🤖", "Умный Помощник 🤖", "Smart Assistant 🤖")
+
+    if action == "start":
+        sec_support(chat_id, lang, mid)
+        return
+
+    if action == "connect":
+        body = tr(lang,
+                  "📱 Ո՞ր հավելվածն եք օգտագործում VPN-ին միանալու համար:",
+                  "📱 Какое приложение вы используете для подключения к VPN?",
+                  "📱 Which app are you using to connect to the VPN?")
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Happ", callback_data="wizard_app"),
+            types.InlineKeyboardButton("INCY", callback_data="wizard_app"),
+        )
+        markup.add(
+            types.InlineKeyboardButton(get_content("btn_back", lang), callback_data="wizard_start"),
+            types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
+        )
+        edit_or_send(chat_id, mid, card(title, body), markup)
+
+    elif action == "app":
+        body = tr(lang,
+                  "🔧 <b>Փորձեք հետևյալ քայլերը.</b>\n\n"
+                  "1. Համոզվեք, որ պատճենել եք հենց Ձեր անձնական հղումը:\n"
+                  "2. Հավելվածում թարմացրեք (Update) սերվերների ցանկը:\n"
+                  "3. Ընտրեք ցանկից մեկ այլ սերվեր (օրինակ 2-րդը) և փորձեք նորից միանալ:\n\n"
+                  "Այս քայլերն օգնեցի՞ն լուծել խնդիրը:",
+                  "🔧 <b>Попробуйте следующие шаги:</b>\n\n"
+                  "1. Убедитесь, что вы скопировали именно вашу личную ссылку.\n"
+                  "2. Обновите (Update) список серверов в приложении.\n"
+                  "3. Выберите другой сервер из списка (например, 2-й) и попробуйте подключиться снова.\n\n"
+                  "Эти шаги помогли решить проблему?",
+                  "🔧 <b>Try the following steps:</b>\n\n"
+                  "1. Make sure you copied your personal link.\n"
+                  "2. Update the server list in the app.\n"
+                  "3. Pick a different server from the list (e.g., the 2nd one) and try connecting again.\n\n"
+                  "Did these steps help solve the issue?")
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(tr(lang, "✅ Այո, օգնեց", "✅ Да, помогло", "✅ Yes, it helped"), callback_data="wizard_solved"),
+            types.InlineKeyboardButton(tr(lang, "❌ Ոչ (Գրել Ադմինին)", "❌ Нет (Написать Админу)", "❌ No (Contact Admin)"), callback_data="wizard_admin"),
+            types.InlineKeyboardButton(get_content("btn_back", lang), callback_data="wizard_connect"),
+        )
+        edit_or_send(chat_id, mid, card(title, body), markup)
+
+    elif action == "speed":
+        body = tr(lang,
+                  "⚡ <b>Արագության բարելավում</b>\n\nՍովորաբար դա լուծվում է շատ հեշտ. պարզապես հավելվածում ընտրեք այլ երկրի սերվեր և նորից միացեք:\n\nԱրագությունը բարելավվե՞ց:",
+                  "⚡ <b>Улучшение скорости</b>\n\nОбычно это решается очень легко: просто выберите сервер другой страны в приложении и переподключитесь.\n\nСкорость улучшилась?",
+                  "⚡ <b>Speed Improvement</b>\n\nThis is usually solved very easily: just select a server from a different country in the app and reconnect.\n\nDid the speed improve?")
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(tr(lang, "✅ Այո, օգնեց", "✅ Да, помогло", "✅ Yes, it helped"), callback_data="wizard_solved"),
+            types.InlineKeyboardButton(tr(lang, "❌ Ոչ (Գրել Ադմինին)", "❌ Нет (Написать Админу)", "❌ No (Contact Admin)"), callback_data="wizard_admin"),
+            types.InlineKeyboardButton(get_content("btn_back", lang), callback_data="wizard_start"),
+        )
+        edit_or_send(chat_id, mid, card(title, body), markup)
+
+    elif action == "solved":
+        body = tr(lang,
+                  "🎉 Շատ ուրախ ենք, որ խնդիրը լուծվեց: Մաղթում ենք հաճելի օգտագործում:",
+                  "🎉 Очень рады, что проблема решена! Желаем приятного пользования.",
+                  "🎉 We are glad the issue is resolved! Enjoy using our service.")
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
+        edit_or_send(chat_id, mid, card(title, body), markup)
+
+    elif action == "admin":
+        body = get_content('text_support_prompt', lang)
+        markup = build_nav_markup(lang, back_callback="wizard_start")
+        edit_or_send(chat_id, mid, card(get_content('btn_support', lang), body), markup)
 
 
 # === TERMS & PRIVACY ===
@@ -1641,7 +1816,7 @@ def menu_router(call):
     sections = {
         "vpn": sec_vpn, "refs": sec_refs, "howto": sec_howto, "faq": sec_faq,
         "support": sec_support, "forum": sec_forum, "iptv": sec_iptv, "info": sec_info,
-        "rate": sec_rate, "reviews": sec_reviews,
+        "adblock": sec_adblock, "rate": sec_rate, "reviews": sec_reviews,
     }
     if key in sections:
         sections[key](chat_id, lang, mid)
@@ -1916,15 +2091,17 @@ def _do_broadcast(message):
             return
 
     users = db_execute("SELECT user_id FROM users", fetchall=True) or []
-    user_ids = [uid for (uid,) in users]
-    # Ուղարկումը կատարվում է background thread-ում, որպեսզի webhook request-ը
-    # չբլոկվի, timeout չլինի, ու Telegram-ը update-ը կրկնակի չուղարկի։
-    threading.Thread(
-        target=_broadcast_worker,
-        args=(user_ids, text, photo_id, video_id),
-        daemon=True,
-    ).start()
-    bot.send_message(ADMIN_ID, f"📤 Broadcast-ը սկսվեց՝ {len(user_ids)} օգտատեր։ Ավարտից հետո կստանաս հաշվետվություն։")
+    # Յուրաքանչյուր user-ի համար հերթի մեջ գրանցում ենք DB-ում (ոչ միայն հիշողությունում),
+    # որպեսզի Render-ի restart/sleep-ի դեպքում էլ broadcast-ը կիսատ չմնա. գործարկվելուն
+    # պես _broadcast_worker_db-ն ինքն է վերսկսում մնացած հերթը։
+    for (uid,) in users:
+        db_execute(
+            "INSERT INTO broadcast_queue (user_id, text, photo_id, video_id) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (user_id) DO NOTHING",
+            (uid, text, photo_id, video_id), commit=True
+        )
+    threading.Thread(target=_broadcast_worker_db, daemon=True).start()
+    bot.send_message(ADMIN_ID, f"📤 Broadcast-ը գրանցվեց և սկսվեց՝ {len(users)} օգտատեր։ Ընդհատվելու դեպքում այն ինքնաշխատ կշարունակվի միանալուն պես։")
 
 
 def _broadcast_send(uid, text, photo_id, video_id):
@@ -1936,15 +2113,23 @@ def _broadcast_send(uid, text, photo_id, video_id):
         bot.send_message(uid, text)
 
 
-def _broadcast_worker(user_ids, text, photo_id=None, video_id=None):
+def _broadcast_worker_db():
+    """DB-ից մեկ առ մեկ վերցնում ու ուղարկում է հերթի հաղորդագրությունները։
+    Քանի որ state-ը (ում ուղարկվեց, ում՝ ոչ) պահվում է հենց DB-ում, restart-ից
+    հետո էլ գործարկվելիս ինքն է շարունակում այնտեղից, որտեղ կանգ էր առել։"""
     sent = 0
     failed = 0
-    for uid in user_ids:
+    while True:
+        row = db_execute("SELECT user_id, text, photo_id, video_id FROM broadcast_queue LIMIT 1", fetchone=True)
+        if not row:
+            break
+        uid, text, photo_id, video_id = row
         try:
             _broadcast_send(uid, text, photo_id, video_id)
+            db_execute("DELETE FROM broadcast_queue WHERE user_id = %s", (uid,), commit=True)
             sent += 1
         except ApiTelegramException as e:
-            # Rate limit (429)՝ սպասում ենք Telegram-ի ասած ժամանակը և կրկնում մեկ անգամ
+            # Rate limit (429)՝ սպասում ենք Telegram-ի ասած ժամանակը և կրկնում (տողը մնում է հերթում)
             if e.error_code == 429:
                 retry_after = 1
                 try:
@@ -1952,21 +2137,20 @@ def _broadcast_worker(user_ids, text, photo_id=None, video_id=None):
                 except Exception:
                     pass
                 time.sleep(retry_after + 1)
-                try:
-                    _broadcast_send(uid, text, photo_id, video_id)
-                    sent += 1
-                except Exception:
-                    failed += 1
+                continue
             else:
+                db_execute("DELETE FROM broadcast_queue WHERE user_id = %s", (uid,), commit=True)
                 failed += 1
         except Exception:
+            db_execute("DELETE FROM broadcast_queue WHERE user_id = %s", (uid,), commit=True)
             failed += 1
         # ~20 հաղորդագրություն/վայրկյան՝ Telegram-ի սահմանաչափից ցածր
         time.sleep(0.05)
-    try:
-        bot.send_message(ADMIN_ID, f"✅ Broadcast-ն ավարտվեց՝ ուղարկված {sent}, ձախողված {failed}")
-    except Exception:
-        log.exception("broadcast summary failed")
+    if sent > 0 or failed > 0:
+        try:
+            bot.send_message(ADMIN_ID, f"✅ Broadcast-ի ցիկլն ավարտվեց՝ նոր ուղարկված {sent}, ձախողված {failed}")
+        except Exception:
+            log.exception("broadcast summary failed")
 
 
 @bot.message_handler(commands=['broadcast'])
@@ -2856,15 +3040,39 @@ def check_all_servers():
         if key not in still_seen:
             _server_fail_counts.pop(key, None)
 
+    # 🚨 Circuit breaker. եթե ԲՈԼՈՐ սերվերները միաժամանակ անհասանելի են, դա, ամենայն
+    # հավանականությամբ, ցանցի/պրովայդերի ընդհանուր խնդիր է (կամ health-check thread-ի
+    # իսկ խնդիր), ոչ թե բոլոր սերվերները իրոք մեռած են։ Այս դեպքում ավտոմատ ջնջում/comment
+    # չենք անում, որպեսզի sub ֆայլը պատահաբար ամբողջովին չդատարկվի, այլ միայն ադմինին ենք ահազանգում։
+    if still_seen and len(to_remove) == len(still_seen):
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                "🚨 <b>ԱՀԱԶԱՆԳ:</b> Բոլոր սերվերները միաժամանակ անհասանելի են "
+                "(հնարավոր է կապի կամ պրովայդերի խնդիր է)։\nԱվտոմատ ջնջումը կասեցվել է՝ ֆայլը պահպանելու համար:",
+                parse_mode="HTML"
+            )
+        except Exception:
+            log.exception("Չհաջողվեց ադմինին ահազանգել բոլոր սերվերների անհասանելիության մասին")
+        return
+
     if not to_remove:
         return
 
     try:
-        new_lines = [l for l in lines if l not in to_remove]
+        # Ամբողջովին ջնջելու փոխարեն՝ comment-ի վերածում ենք (# [AUTO-DISABLED] ...),
+        # որպեսզի սերվերի configuration-ը մնա ֆայլում պատմության/ձեռքով վերականգնման
+        # համար, և պատահաբար ամբողջովին բան չկորչի։
+        new_lines = []
+        for l in lines:
+            if l in to_remove:
+                new_lines.append(f"# [AUTO-DISABLED] {l}")
+            else:
+                new_lines.append(l)
         new_content_str = '\n'.join(new_lines)
         repo.update_file(
             contents.path,
-            f"Auto-removed {len(to_remove)} dead server(s)",
+            f"Auto-disabled {len(to_remove)} dead server(s)",
             new_content_str,
             contents.sha,
         )
@@ -2874,10 +3082,10 @@ def check_all_servers():
             try:
                 bot.send_message(
                     ADMIN_ID,
-                    f"⚠️ Ավտոմատ ջնջվեց ոչ աշխատող սերվեր՝ {protocol or 'UNKNOWN'} {name or line[:50]}"
+                    f"⚠️ Ավտոմատ կասեցվեց ոչ աշխատող սերվեր՝ {protocol or 'UNKNOWN'} {name or line[:50]}\n(Տողը դարձել է comment ֆայլում)"
                 )
             except Exception:
-                log.exception("Չհաջողվեց ադմինին ծանուցել ջնջված սերվերի մասին")
+                log.exception("Չհաջողվեց ադմինին ծանուցել կասեցված սերվերի մասին")
     except Exception:
         log.exception("check_all_servers: sub ֆայլը թարմացնել չհաջողվեց")
 
@@ -2904,12 +3112,27 @@ def setup_webhook():
     print(f"✅ Webhook-ը սահմանվեց՝ {WEBHOOK_URL}")
 
 
+def start_scheduler():
+    """Ֆիքսված ժամերով ինքնաշխատ առաջադրանքներ (ամսվա չեմպիոն, ծննդյան օր),
+    որպեսզի դրանք տեղի ունենան ճշգրիտ ժամին՝ անկախ trafic-ից (ի տարբերություն
+    webhook-ի ներսում եղած throttled ստուգումների, որոնք trafic-ից են կախված)։"""
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(check_month_champion, 'cron', day=1, hour=0, minute=5)
+    scheduler.add_job(daily_birthday_check, 'cron', hour=10, minute=0)
+    scheduler.start()
+    log.info("APScheduler started (champion: 1st of month 00:05, birthdays: daily 10:00, both in server-local/UTC time).")
+
+
 # Both of these run at module load time (i.e. also when gunicorn
 # imports `bot:app`, not only when running `python bot.py`
 # directly).
 init_db()
 setup_webhook()
 start_server_health_check()
+start_scheduler()
+# Եթե նախորդ deploy/restart-ի պահին broadcast կիսատ էր մնացել, DB-ի
+# հերթում մնացած տողերը կան դեռ, ուստի այստեղ ինքնաշխատ շարունակում ենք։
+threading.Thread(target=_broadcast_worker_db, daemon=True).start()
 
 
 if __name__ == '__main__':
