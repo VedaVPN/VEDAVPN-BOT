@@ -200,30 +200,6 @@ CONTENT_DEFAULTS = {
     'btn_privacy':   {'hy': "🔒 Գաղտնիության քաղաքականություն", 'ru': "🔒 Политика конфиденциальности"},
     'btn_back':      {'hy': "⬅️ Հետ", 'ru': "⬅️ Назад"},
     'btn_main_menu': {'hy': "🏠 Գլխավոր մենյու", 'ru': "🏠 Главное меню"},
-    'btn_adblock':   {'hy': "🛡 Առանց Գովազդի", 'ru': "🛡 Без рекламы"},
-
-    'text_adblock': {
-        'hy': (
-            "🛡 <b>Առանց Գովազդի (AdBlock)</b>\n\n"
-            "Վեբ-կայքերում և խաղերում գովազդներից ընդմիշտ ազատվելու համար, փոխեք DNS կարգավորումները Ձեր VPN հավելվածում.\n\n"
-            "<b>📱 Happ կամ INCY հավելվածներում.</b>\n"
-            "1. Բացեք հավելվածի կարգավորումները (Settings)\n"
-            "2. Գտեք <b>Custom DNS</b> կամ <b>DNS</b> բաժինը\n"
-            "3. Միացրեք այն և մուտքագրեք հետևյալ IP հասցեն՝\n"
-            "<code>94.140.14.14</code>\n\n"
-            "✅ Պահպանեք և վերամիացեք VPN-ին: Գովազդներն այլևս չեն խանգարի Ձեզ!"
-        ),
-        'ru': (
-            "🛡 <b>Без рекламы (AdBlock)</b>\n\n"
-            "Чтобы навсегда избавиться от рекламы на сайтах и в играх, измените настройки DNS в вашем VPN-приложении.\n\n"
-            "<b>📱 В приложениях Happ или INCY:</b>\n"
-            "1. Откройте настройки (Settings) приложения\n"
-            "2. Найдите раздел <b>Custom DNS</b> или <b>DNS</b>\n"
-            "3. Включите его и введите следующий IP-адрес:\n"
-            "<code>94.140.14.14</code>\n\n"
-            "✅ Сохраните и переподключите VPN. Реклама больше не будет вас беспокоить!"
-        ),
-    },
 
     'text_choose_lang': {
         'hy': "🌍 Ընտրեք լեզուն / Выберите язык:",
@@ -451,17 +427,6 @@ CONTENT_EN = {
     'btn_terms':     "📄 Terms of Use",
     'btn_privacy':   "🔒 Privacy Policy",
     'btn_back':      "⬅️ Back",
-    'btn_adblock':   "🛡 AdBlock",
-    'text_adblock': (
-        "🛡 <b>AdBlock</b>\n\n"
-        "To get rid of ads on websites and in games forever, change the DNS settings in your VPN app.\n\n"
-        "<b>📱 In Happ or INCY apps:</b>\n"
-        "1. Open the app settings (Settings)\n"
-        "2. Find the <b>Custom DNS</b> or <b>DNS</b> section\n"
-        "3. Enable it and enter the following IP address:\n"
-        "<code>94.140.14.14</code>\n\n"
-        "✅ Save and reconnect to the VPN. Ads will no longer bother you!"
-    ),
     'btn_main_menu': "🏠 Main menu",
     'text_choose_lang': "🌍 Ընտրեք լեզուն / Выберите язык / Choose language:",
     'text_subscribe_warn': "⚠️ Please subscribe to the channel and press the check button:",
@@ -714,9 +679,6 @@ def build_main_menu_inline(lang):
     markup.add(
         types.InlineKeyboardButton(get_content('btn_iptv', lang), callback_data="menu_iptv"),
         types.InlineKeyboardButton(get_content('btn_info', lang), callback_data="menu_info"),
-    )
-    markup.add(
-        types.InlineKeyboardButton(get_content('btn_adblock', lang), callback_data="menu_adblock"),
     )
     custom = db_execute("SELECT id, label_hy, label_ru FROM custom_buttons", fetchall=True) or []
     for btn_id, label_hy, label_ru in custom:
@@ -1473,17 +1435,6 @@ def iptv(message):
     sec_iptv(message.chat.id, lang)
 
 
-# === ADBLOCK ===
-def sec_adblock(chat_id, lang, message_id=None):
-    edit_or_send(chat_id, message_id, card(get_content('btn_adblock', lang), get_content('text_adblock', lang)), build_nav_markup(lang))
-
-
-@bot.message_handler(func=lambda m: is_menu_btn(m.text, 'btn_adblock'))
-def adblock_menu(message):
-    lang = get_lang(message.chat.id)
-    show_typing(message.chat.id)
-    hide_main_menu(message.chat.id)
-    sec_adblock(message.chat.id, lang)
 
 
 # === SUPPORT (wizard-style self-help before reaching the admin) ===
@@ -1816,7 +1767,7 @@ def menu_router(call):
     sections = {
         "vpn": sec_vpn, "refs": sec_refs, "howto": sec_howto, "faq": sec_faq,
         "support": sec_support, "forum": sec_forum, "iptv": sec_iptv, "info": sec_info,
-        "adblock": sec_adblock, "rate": sec_rate, "reviews": sec_reviews,
+        "rate": sec_rate, "reviews": sec_reviews,
     }
     if key in sections:
         sections[key](chat_id, lang, mid)
