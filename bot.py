@@ -1828,7 +1828,7 @@ def sec_vip(chat_id, lang, message_id=None):
                   "🚀 Faster VIP servers\n🛠 Priority support\n🔗 Your link stays the same — after payment just refresh the server list in the app.\n\nPayment in Telegram Stars ⭐ 👇")
     markup = types.InlineKeyboardMarkup(row_width=1)
     # 🎁 Եթե օգտատերը դեռ չի օգտագործել փորձնականը, ցույց ենք տալիս կոճակը
-    if not has_used_vip_trial(chat_id):
+    if not is_vip(chat_id) and not has_used_vip_trial(chat_id):
         trial_label = tr(lang, "🎁 3 օր փորձնական (Անվճար)", "🎁 3 дня пробный (Бесплатно)", "🎁 3 days trial (Free)")
         markup.add(types.InlineKeyboardButton(trial_label, callback_data="vip_trial"))
     for plan_key, plan in VIP_PLANS.items():
@@ -1846,6 +1846,10 @@ def activate_vip_trial(call):
     # Կրկնակի ստուգում բազայից՝ չարաշահումները բացառելու համար
     if has_used_vip_trial(uid):
         bot.answer_callback_query(call.id, tr(lang, "❌ Դուք արդեն օգտագործել եք փորձնական տարբերակը", "❌ Вы уже использовали пробную версию", "❌ You have already used the trial version"), show_alert=True)
+        return
+    # 👑 Ակտիվ VIP ունեցողները փորձնական չեն կարող ակտիվացնել
+    if is_vip(uid):
+        bot.answer_callback_query(call.id, tr(lang, "❌ Դու արդեն ակտիվ VIP ունես", "❌ У тебя уже есть активный VIP", "❌ You already have an active VIP"), show_alert=True)
         return
     # Ակտիվացնում ենք 3 օր և նշում բազայում
     grant_vip_days(uid, 3)
