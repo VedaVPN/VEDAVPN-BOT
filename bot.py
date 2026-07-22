@@ -203,6 +203,8 @@ def init_db():
                  stars INTEGER,
                  charge_id TEXT,
                  ts TIMESTAMP DEFAULT now())''', commit=True)
+    # 🎁 VIP Trial-ի վերահսկում՝ մեկանգամյա անվճար փորձնական շրջան
+    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_trial_used BOOLEAN DEFAULT FALSE", commit=True)
 
 
 # === 👑 VIP ԲԱԺԱՆՈՐԴԱԳՐՈՒԹՅՈՒՆ (Telegram Stars) ===
@@ -229,6 +231,17 @@ def grant_vip_days(user_id, days):
     new_until = base + timedelta(days=days)
     db_execute("UPDATE users SET vip_until = %s WHERE user_id = %s", (new_until, user_id), commit=True)
     return new_until
+
+
+def has_used_vip_trial(user_id):
+    """Ստուգում է, արդյոք օգտատերը արդեն օգտվել է փորձնական VIP-ից։"""
+    row = db_execute("SELECT vip_trial_used FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+    return row[0] if row and row[0] is not None else False
+
+
+def mark_vip_trial_used(user_id):
+    """Նշում է, որ օգտատերն օգտագործեց փորձնական VIP-ը։"""
+    db_execute("UPDATE users SET vip_trial_used = TRUE WHERE user_id = %s", (user_id,), commit=True)
 
 
 # === CONTENT (bilingual texts, editable by the admin) ===
@@ -1814,11 +1827,37 @@ def sec_vip(chat_id, lang, message_id=None):
                   "🚀 Более быстрые VIP-серверы\n🛠 Приоритетная поддержка\n🔗 Ссылка остаётся той же — после оплаты просто обнови список серверов в приложении.\n\nОплата в Telegram Stars ⭐ 👇",
                   "🚀 Faster VIP servers\n🛠 Priority support\n🔗 Your link stays the same — after payment just refresh the server list in the app.\n\nPayment in Telegram Stars ⭐ 👇")
     markup = types.InlineKeyboardMarkup(row_width=1)
+    # 🎁 Եթե օգտատերը դեռ չի օգտագործել փորձնականը, ցույց ենք տալիս կոճակը
+    if not has_used_vip_trial(chat_id):
+        trial_label = tr(lang, "🎁 3 օր փորձնական (Անվճար)", "🎁 3 дня пробный (Бесплатно)", "🎁 3 days trial (Free)")
+        markup.add(types.InlineKeyboardButton(trial_label, callback_data="vip_trial"))
     for plan_key, plan in VIP_PLANS.items():
         label = f"{plan.get(lang, plan['ru'])} — {plan['stars']} ⭐"
         markup.add(types.InlineKeyboardButton(label, callback_data=f"buyvip_{plan_key}"))
     markup.add(types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"))
     edit_or_send(chat_id, message_id, card(title, body), markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "vip_trial")
+def activate_vip_trial(call):
+    """Ակտիվացնում է 3-օրյա VIP-ը և փակում կրկնակի օգտագործման հնարավորությունը։"""
+    uid = call.from_user.id
+    lang = get_lang(uid)
+    # Կրկնակի ստուգում բազայից՝ չարաշահումները բացառելու համար
+    if has_used_vip_trial(uid):
+        bot.answer_callback_query(call.id, tr(lang, "❌ Դուք արդեն օգտագործել եք փորձնական տարբերակը", "❌ Вы уже использовали пробную версию", "❌ You have already used the trial version"), show_alert=True)
+        return
+    # Ակտիվացնում ենք 3 օր և նշում բազայում
+    grant_vip_days(uid, 3)
+    mark_vip_trial_used(uid)
+    bot.answer_callback_query(call.id, tr(lang, "✅ Փորձնական VIP-ը ակտիվացվեց 3 օրով", "✅ Пробный VIP активирован на 3 дня", "✅ Trial VIP activated for 3 days"), show_alert=True)
+    # Թարմացնում ենք էջը, որ կոճակն անհետանա ու երևա «VIP-դ ակտիվ է» տեքստը
+    sec_vip(uid, lang, call.message.message_id)
+    # Ծանուցում ադմինին
+    try:
+        bot.send_message(ADMIN_ID, f"🎁 Օգտատեր <code>{uid}</code> ակտիվացրեց 3-օրյա VIP փորձնական փաթեթը։")
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buyvip_"))
