@@ -993,7 +993,7 @@ def check_month_champion():
         pass
     try:
         bot.send_message(ADMIN_ID,
-                         f"🏅 Ամսվա չեմպիոն ({prev_month})՝ <code>{champ_id}</code> {fb_escape(champ_name)} — {champ_count} հրավեր",
+                         f"🏅 Чемпион месяца ({prev_month}): <code>{champ_id}</code> {fb_escape(champ_name)} — {champ_count} приглашений",
                          parse_mode="HTML")
     except Exception:
         pass
@@ -1859,7 +1859,7 @@ def activate_vip_trial(call):
     sec_vip(uid, lang, call.message.message_id)
     # Ծանուցում ադմինին
     try:
-        bot.send_message(ADMIN_ID, f"🎁 Օգտատեր <code>{uid}</code> ակտիվացրեց 3-օրյա VIP փորձնական փաթեթը։")
+        bot.send_message(ADMIN_ID, f"🎁 Пользователь <code>{uid}</code> активировал 3-дневный пробный VIP.")
     except Exception:
         pass
 
@@ -1910,7 +1910,7 @@ def got_payment(message):
         f"👑 Thank you! VIP is active until <b>{new_until.strftime('%d.%m.%Y')}</b>.\nSame link — just refresh the server list in the app."))
     try:
         bot.send_message(ADMIN_ID,
-                         f"💰 Նոր VIP վճարում՝ <code>{uid}</code>, {sp.invoice_payload}, {plan['stars']} ⭐")
+                         f"💰 Новый VIP-платёж: <code>{uid}</code>, {sp.invoice_payload}, {plan['stars']} ⭐")
     except Exception:
         pass
 
@@ -1976,13 +1976,13 @@ def feedback_reply(message):
         return
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 3 or not parts[1].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/freply user_id պատասխանի տեքստ</code>", parse_mode="HTML")
+        bot.send_message(ADMIN_ID, "Использование: <code>/freply user_id текст ответа</code>", parse_mode="HTML")
         return
     fb_uid = int(parts[1])
     reply_text = parts[2].strip()[:500]
     row = db_execute("SELECT rating, comment FROM feedback WHERE user_id = %s", (fb_uid,), fetchone=True)
     if not row:
-        bot.send_message(ADMIN_ID, "Այդ ID-ով կարծիք չկա։")
+        bot.send_message(ADMIN_ID, "Отзыва с таким ID нет.")
         return
     db_execute("UPDATE feedback SET reply = %s WHERE user_id = %s", (reply_text, fb_uid), commit=True)
     user_lang = get_lang(fb_uid)
@@ -1992,9 +1992,9 @@ def feedback_reply(message):
                 f"↩️ VedaVPN replied to your review:\n\n«{fb_escape(reply_text)}»")
     try:
         bot.send_message(fb_uid, notice)
-        bot.send_message(ADMIN_ID, "✅ Պատասխանը պահպանվեց և ուղարկվեց հեղինակին։")
+        bot.send_message(ADMIN_ID, "✅ Ответ сохранён и отправлен автору.")
     except Exception:
-        bot.send_message(ADMIN_ID, "✅ Պատասխանը պահպանվեց, բայց հեղինակին ուղարկել չստացվեց (հնարավոր է՝ բլոկել է բոտը)։")
+        bot.send_message(ADMIN_ID, "✅ Ответ сохранён, но отправить автору не удалось (возможно, автор заблокировал бота).")
 
 
 # === ADMIN. Feedback stats ===
@@ -2005,12 +2005,12 @@ def feedback_stats(message):
     rows = db_execute("SELECT rating, COUNT(*) FROM feedback GROUP BY rating", fetchall=True) or []
     total = sum(r[1] for r in rows)
     if not total:
-        bot.send_message(ADMIN_ID, "⭐ Դեռ գնահատականներ չկան։")
+        bot.send_message(ADMIN_ID, "⭐ Оценок пока нет.")
         return
     avg = sum((r[0] or 0) * r[1] for r in rows) / total
     counts = {r[0]: r[1] for r in rows}
-    lines = ["⭐ <b>Feedback վիճակագրություն</b>",
-             f"Միջին գնահատական՝ <b>{avg:.2f}/5</b> ({total} ձայն)", ""]
+    lines = ["⭐ <b>Статистика отзывов</b>",
+             f"Средняя оценка: <b>{avg:.2f}/5</b> ({total} голосов)", ""]
     for star in range(5, 0, -1):
         n = counts.get(star, 0)
         bar = "▮" * min(n, 20) + ("…" if n > 20 else "")
@@ -2021,11 +2021,11 @@ def feedback_stats(message):
         "ORDER BY updated_at DESC LIMIT 10", fetchall=True) or []
     if comments:
         lines.append("")
-        lines.append("💬 <b>Վերջին մեկնաբանությունները</b>")
+        lines.append("💬 <b>Последние комментарии</b>")
         for fb_uid, fb_r, fb_c in comments:
             lines.append(f"• <code>{fb_uid}</code> {'⭐' * (fb_r or 0)} — {fb_escape(fb_c[:150])}")
         lines.append("")
-        lines.append("↩️ Պատասխանելու համար. <code>/freply user_id տեքստ</code>")
+        lines.append("↩️ Чтобы ответить: <code>/freply user_id текст</code>")
     bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
 
 
@@ -2038,37 +2038,37 @@ def admin_panel(message):
     total = row[0] if row else 0
     bot.send_message(
         ADMIN_ID,
-        f"📊 Օգտատերեր: {total}\n\n"
-        f"<b>Հրամաններ.</b>\n"
-        f"/stats — մանրամասն վիճակագրություն 📊\n"
-        f"/growth — վերջին 30 օրվա աճի գրաֆիկ 📈\n"
-        f"/export — օգտատերերի ցուցակը CSV ֆայլով 📁\n"
-        f"/ban ID — անջատել օգտատիրոջ sub հղումը 🚫\n"
-        f"/unban ID — վերականգնել օգտատիրոջ sub հղումը ✅\n"
-        f"/vip ID DAYS — VIP տալ/երկարացնել 👑\n"
-        f"/unvip ID — հանել VIP-ը ❌\n"
-        f"/refund ID — վերադարձնել վերջին Stars վճարումը 💫\n"
-        f"/broadcast տեքստ (կամ նկար/վիդեո՝ caption-ում /broadcast տեքստ) — ուղարկել բոլորին\n"
-        f"/reply ID տեքստ — պատասխանել user-ի\n"
-        f"/listkeys — ��ույց տալ բոլոր editable content key-ները\n"
-        f"/getcontent key — ցույց տալ key-ի ընթացիկ hy/ru արժեքները\n"
-        f"/setcontent key lang տեքստ — փոխել կոճակի/տեքստի արժեքը\n"
-        f"/getconfig — ցույց տալ VPN/forum հղումները\n"
-        f"/setlink նոր_հղում — փոխել VPN հղումը\n"
-        f"/setforum նոր_հղում — փոխել forum հղումը\n"
-        f"/setiptv նոր_հղում — փոխել IPTV հղումը\n"
-        f"/setphoto — սահմանել ողջյունի նկարը (ուղարկիր նկար caption-ում /setphoto, կամ reply արա նկարին)\n\n"
-        f"<b>Նոր կոճակներ.</b>\n"
-        f"/addbutton անուն_hy|անուն_ru|պատասխան_hy|պատասխան_ru — ավելացնել նոր կոճակ (առա��ց prefix, պարզապես 4 մաս | -ով)\n"
-        f"/listbuttons — ցույց տալ ավելացված կոճակները\n"
-        f"/removebutton ID — հեռացնել կոճակ\n\n"
-        f"<b>Sub ֆայլի կառավարում (GitHub).</b>\n"
-        f"/update_sub [տեքստ] — թա������ացնել ամբողջ sub ֆայլը\n"
-        f"/append_sub [հղում] — ավելացնել նոր սերվեր (առանց ջնջելու)\n"
-        f"/delete_sub_keyword [հիմնաբառ] — ջնջել սերվերը\n"
-        f"/list_and_delete — ցույց տալ սերվերները կոճակներով\n"
-        f"/show_sub — ցույց տալ ֆայլի բովանդակությունը\n"
-        f"/clear_sub — ջնջել բոլոր սերվերները"
+        f"📊 Пользователи: {total}\n\n"
+        f"<b>Команды:</b>\n"
+        f"/stats — подробная статистика 📊\n"
+        f"/growth — график роста за последние 30 дней 📈\n"
+        f"/export — список пользователей CSV-файлом 📁\n"
+        f"/ban ID — отключить sub-ссылку пользователя 🚫\n"
+        f"/unban ID — восстановить sub-ссылку пользователя ✅\n"
+        f"/vip ID DAYS — выдать/продлить VIP 👑\n"
+        f"/unvip ID — снять VIP ❌\n"
+        f"/refund ID — вернуть последний платёж Stars 💫\n"
+        f"/broadcast текст (или фото/видео с /broadcast текст в caption) — отправить всем\n"
+        f"/reply ID текст — ответить пользователю\n"
+        f"/listkeys — показать все editable content key-и\n"
+        f"/getcontent key — показать текущие hy/ru значения key\n"
+        f"/setcontent key lang текст — изменить текст кнопки/сообщения\n"
+        f"/getconfig — показать VPN/forum ссылки\n"
+        f"/setlink новая_ссылка — изменить VPN-ссылку\n"
+        f"/setforum новая_ссылка — изменить forum-ссылку\n"
+        f"/setiptv новая_ссылка — изменить IPTV-ссылку\n"
+        f"/setphoto — установить приветственное фото (отправь фото с /setphoto в caption или сделай reply на фото)\n\n"
+        f"<b>Новые кнопки:</b>\n"
+        f"/addbutton имя_hy|имя_ru|ответ_hy|ответ_ru — добавить новую кнопку (без префиксов, просто 4 части через |)\n"
+        f"/listbuttons — показать добавленные кнопки\n"
+        f"/removebutton ID — удалить кнопку\n\n"
+        f"<b>Управление sub-файлом (GitHub):</b>\n"
+        f"/update_sub [текст] — обновить весь sub-файл\n"
+        f"/append_sub [ссылка] — добавить новый сервер (без удаления)\n"
+        f"/delete_sub_keyword [ключевое слово] — удалить сервер\n"
+        f"/list_and_delete — показать серверы с кнопками\n"
+        f"/show_sub — показать содержимое файла\n"
+        f"/clear_sub — удалить все серверы"
     )
 
 
@@ -2102,28 +2102,28 @@ def stats_cmd(message):
         return f"{n * 100 // total}%" if total else "0%"
 
     lines = [
-        "📊 <b>Ընդլայնված վիճակագրություն</b>",
+        "📊 <b>Расширенная статистика</b>",
         "",
-        f"👥 Ընդհանուր օգտատերեր՝ <b>{total}</b>",
-        f"🆕 Այսօր՝ <b>{today}</b>",
-        f"📅 Վերջին 7 օրը՝ <b>{week}</b>",
+        f"👥 Всего пользователей: <b>{total}</b>",
+        f"🆕 Сегодня: <b>{today}</b>",
+        f"📅 За последние 7 дней: <b>{week}</b>",
         "",
-        "<b>🌍 Լեզուներ</b>",
-        f"🇦🇲 Հայ��րեն՝ {hy} ({pct(hy)})",
-        f"🇷🇺 Русский՝ {ru} ({pct(ru)})",
-        f"🇬🇧 English՝ {en} ({pct(en)})",
+        "<b>🌍 Языки</b>",
+        f"🇦🇲 Հայերեն: {hy} ({pct(hy)})",
+        f"🇷🇺 Русский: {ru} ({pct(ru)})",
+        f"🇬🇧 English: {en} ({pct(en)})",
         "",
-        "<b>📱 Սարքեր</b>",
-        f"🤖 Android՝ {android}",
-        f"🍏 iPhone՝ {ios}",
+        "<b>📱 Устройства</b>",
+        f"🤖 Android: {android}",
+        f"🍏 iPhone: {ios}",
         "",
-        f"🔗 Ընդհանուր ռեֆերալներ՝ <b>{total_refs}</b>",
-        f"🚫 Անջատված sub հղումներ՝ <b>{banned_cnt}</b>",
-        f"👑 Ակտիվ VIP բաժանորդներ՝ <b>{vip_cnt}</b>",
+        f"🔗 Всего рефералов: <b>{total_refs}</b>",
+        f"🚫 Отключённые sub-ссылки: <b>{banned_cnt}</b>",
+        f"👑 Активные VIP-подписчики: <b>{vip_cnt}</b>",
     ]
     if top:
         lines.append("")
-        lines.append("<b>🏆 Թոփ հրավիրողներ</b>")
+        lines.append("<b>🏆 Топ приглашающих</b>")
         for i, (uid, cnt) in enumerate(top, 1):
             lines.append(f"{i}. <code>{uid}</code> — {cnt}")
 
@@ -2147,7 +2147,7 @@ def export_users_cmd(message):
         writer.writerow(r)
     bio = BytesIO(buf.getvalue().encode('utf-8-sig'))
     bio.name = "vedavpn_users.csv"
-    bot.send_document(ADMIN_ID, bio, caption=f"📁 Ընդամենը {len(rows)} օգտատեր")
+    bot.send_document(ADMIN_ID, bio, caption=f"📁 Всего {len(rows)} пользователей")
 
 
 @bot.message_handler(commands=['growth'])
@@ -2165,7 +2165,7 @@ def growth_cmd(message):
     today = date.today()
     days = [today - timedelta(days=i) for i in range(29, -1, -1)]
     mx = max([counts.get(d, 0) for d in days] + [1])
-    lines = ["📈 <b>Նոր օգտատերեր՝ վերջին 30 օր</b>", ""]
+    lines = ["📈 <b>Новые пользователи — последние 30 дней</b>", ""]
     total = 0
     for d in days:
         c = counts.get(d, 0)
@@ -2173,7 +2173,7 @@ def growth_cmd(message):
         bar = "▇" * (max(1, round(c / mx * 12)) if c else 0)
         lines.append(f"<code>{d.strftime('%d.%m')} {bar or '·'} {c}</code>")
     lines.append("")
-    lines.append(f"Ընդամենը՝ <b>{total}</b>")
+    lines.append(f"Всего: <b>{total}</b>")
     bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML")
 
 
@@ -2184,11 +2184,11 @@ def ban_cmd(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/ban USER_ID</code>")
+        bot.send_message(ADMIN_ID, "Использование: <code>/ban USER_ID</code>")
         return
     uid = int(parts[1])
     db_execute("UPDATE users SET banned = TRUE WHERE user_id = %s", (uid,), commit=True)
-    bot.send_message(ADMIN_ID, f"🚫 <code>{uid}</code> օգտատիրոջ sub հղումն անջատվեց")
+    bot.send_message(ADMIN_ID, f"🚫 sub-ссылка пользователя <code>{uid}</code> отключена")
 
 
 @bot.message_handler(commands=['unban'])
@@ -2198,11 +2198,11 @@ def unban_cmd(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/unban USER_ID</code>")
+        bot.send_message(ADMIN_ID, "Использование: <code>/unban USER_ID</code>")
         return
     uid = int(parts[1])
     db_execute("UPDATE users SET banned = FALSE WHERE user_id = %s", (uid,), commit=True)
-    bot.send_message(ADMIN_ID, f"✅ <code>{uid}</code> օգտատիրոջ sub հղումը վերականգնվեց")
+    bot.send_message(ADMIN_ID, f"✅ sub-ссылка пользователя <code>{uid}</code> восстановлена")
 
 
 @bot.message_handler(commands=['vip'])
@@ -2212,11 +2212,11 @@ def vip_cmd(message):
         return
     parts = message.text.split()
     if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/vip USER_ID DAYS</code>")
+        bot.send_message(ADMIN_ID, "Использование: <code>/vip USER_ID DAYS</code>")
         return
     uid, days = int(parts[1]), int(parts[2])
     new_until = grant_vip_days(uid, days)
-    bot.send_message(ADMIN_ID, f"👑 <code>{uid}</code> → VIP մինչև {new_until.strftime('%d.%m.%Y')}")
+    bot.send_message(ADMIN_ID, f"👑 <code>{uid}</code> → VIP до {new_until.strftime('%d.%m.%Y')}")
 
 
 @bot.message_handler(commands=['unvip'])
@@ -2226,10 +2226,10 @@ def unvip_cmd(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/unvip USER_ID</code>")
+        bot.send_message(ADMIN_ID, "Использование: <code>/unvip USER_ID</code>")
         return
     db_execute("UPDATE users SET vip_until = NULL WHERE user_id = %s", (int(parts[1]),), commit=True)
-    bot.send_message(ADMIN_ID, "✅ VIP-ը հանվեց")
+    bot.send_message(ADMIN_ID, "✅ VIP снят")
 
 
 @bot.message_handler(commands=['refund'])
@@ -2239,20 +2239,20 @@ def refund_cmd(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
-        bot.send_message(ADMIN_ID, "Օգտագործում՝ <code>/refund USER_ID</code>")
+        bot.send_message(ADMIN_ID, "Использование: <code>/refund USER_ID</code>")
         return
     uid = int(parts[1])
     row = db_execute("SELECT charge_id FROM payments WHERE user_id = %s ORDER BY ts DESC LIMIT 1",
                      (uid,), fetchone=True)
     if not row or not row[0]:
-        bot.send_message(ADMIN_ID, "❌ Այդ user-ի վճարում չգտնվեց")
+        bot.send_message(ADMIN_ID, "❌ Платёж этого пользователя не найден")
         return
     try:
         bot.refund_star_payment(uid, row[0])
         db_execute("UPDATE users SET vip_until = NULL WHERE user_id = %s", (uid,), commit=True)
-        bot.send_message(ADMIN_ID, "✅ Refund կատարվեց, VIP-ը հանվեց")
+        bot.send_message(ADMIN_ID, "✅ Refund выполнен, VIP снят")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Refund չստացվեց՝ {e}")
+        bot.send_message(ADMIN_ID, f"❌ Refund не удался: {e}")
 
 
 def _do_broadcast(message):
@@ -2271,10 +2271,10 @@ def _do_broadcast(message):
         except IndexError:
             bot.send_message(
                 ADMIN_ID,
-                "❌ Օգտագործիր՝\n"
-                "<code>/broadcast տեքստ</code>\n"
-                "կամ ուղարկիր նկար/վիդեո՝ caption-ում գրելով.\n"
-                "<code>/broadcast տեքստ</code>"
+                "❌ Используй:\n"
+                "<code>/broadcast текст</code>\n"
+                "или отправь фото/видео, написав в caption:\n"
+                "<code>/broadcast текст</code>"
             )
             return
 
@@ -2289,7 +2289,7 @@ def _do_broadcast(message):
             (uid, text, photo_id, video_id), commit=True
         )
     threading.Thread(target=_broadcast_worker_db, daemon=True).start()
-    bot.send_message(ADMIN_ID, f"📤 Broadcast-ը գրանցվեց և սկսվեց՝ {len(users)} օգտատեր։ Ընդհատվելու դեպքում այն ինքնաշխատ կշարունակվի միանալուն պես։")
+    bot.send_message(ADMIN_ID, f"📤 Рассылка запущена: {len(users)} пользователей. При прерывании она автоматически продолжится после перезапуска.")
 
 
 def _broadcast_send(uid, text, photo_id, video_id):
@@ -2336,7 +2336,7 @@ def _broadcast_worker_db():
         time.sleep(0.05)
     if sent > 0 or failed > 0:
         try:
-            bot.send_message(ADMIN_ID, f"✅ Broadcast-ի ցիկլն ավարտվեց՝ նոր ուղարկված {sent}, ձախողված {failed}")
+            bot.send_message(ADMIN_ID, f"✅ Цикл рассылки завершён: новых отправлено {sent}, не доставлено {failed}")
         except Exception:
             log.exception("broadcast summary failed")
 
@@ -2369,9 +2369,9 @@ def reply(message):
     try:
         parts = message.text.split(maxsplit=2)
         bot.send_message(int(parts[1]), f"📩 Պատասխան ադմինից / Ответ от админа:\n\n{parts[2]}")
-        bot.send_message(ADMIN_ID, f"✅ Ուղարկվեց user {parts[1]}-ին")
+        bot.send_message(ADMIN_ID, f"✅ Отправлено пользователю {parts[1]}")
     except Exception:
-        bot.send_message(ADMIN_ID, "❌ Սխալ ID կամ տեքստ. /reply ID տեքստ")
+        bot.send_message(ADMIN_ID, "❌ Неверный ID или текст: /reply ID текст")
 
 
 # === ADMIN. CONTENT EDITING (buttons, FAQ, howto) ===
@@ -2382,9 +2382,9 @@ def list_keys(message):
     keys = "\n".join(f"• <code>{k}</code>" for k in CONTENT_DEFAULTS.keys())
     bot.send_message(
         ADMIN_ID,
-        f"📋 <b>Editable content key-եր.</b>\n\n{keys}\n\n"
-        f"Օգտագործիր՝ /getcontent key — ընթացիկ արժեքը տեսնելու\n"
-        f"/setcontent key lang նոր_տեքստ — փոխելու (lang = hy կամ ru)"
+        f"📋 <b>Editable content key-и:</b>\n\n{keys}\n\n"
+        f"Используй: /getcontent key — посмотреть текущее значение\n"
+        f"/setcontent key lang новый_текст — изменить (lang = hy или ru)"
     )
 
 
@@ -2395,10 +2395,10 @@ def get_content_cmd(message):
     try:
         key = message.text.split(maxsplit=1)[1].strip()
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /getcontent key")
+        bot.send_message(ADMIN_ID, "❌ Используй: /getcontent key")
         return
     if key not in CONTENT_DEFAULTS:
-        bot.send_message(ADMIN_ID, f"❌ ��նհայտ key. Տես /listkeys")
+        bot.send_message(ADMIN_ID, "❌ Неизвестный key. Смотри /listkeys")
         return
     hy_val = get_content(key, 'hy')
     ru_val = get_content(key, 'ru')
@@ -2418,18 +2418,18 @@ def set_content_cmd(message):
         parts = message.text.split(maxsplit=3)
         key, lang, new_text = parts[1], parts[2], parts[3]
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setcontent key lang նոր_տեքստ\n(lang = hy կամ ru)")
+        bot.send_message(ADMIN_ID, "❌ Используй: /setcontent key lang новый_текст\n(lang = hy или ru)")
         return
 
     if key not in CONTENT_DEFAULTS:
-        bot.send_message(ADMIN_ID, f"❌ Անհայտ key «{key}». Տես /listkeys")
+        bot.send_message(ADMIN_ID, f"❌ Неизвестный key «{key}». Смотри /listkeys")
         return
     if lang not in ('hy', 'ru'):
-        bot.send_message(ADMIN_ID, "❌ lang-ը պետք է լինի hy կամ ru")
+        bot.send_message(ADMIN_ID, "❌ lang должен быть hy или ru")
         return
 
     set_content(key, lang, new_text)
-    bot.send_message(ADMIN_ID, f"✅ «{key}» ({lang}) թարմացվեց։")
+    bot.send_message(ADMIN_ID, f"✅ «{key}» ({lang}) обновлён.")
 
 
 # === ADMIN. CONFIG (VPN link, forum link) ===
@@ -2439,11 +2439,11 @@ def get_config_cmd(message):
         return
     bot.send_message(
         ADMIN_ID,
-        f"⚙️ <b>Ընթացիկ config.</b>\n\n"
+        f"⚙️ <b>Текущий config:</b>\n\n"
         f"VPN link:\n<code>{get_config('vpn_link')}</code>\n\n"
         f"Forum link:\n<code>{get_config('forum_link')}</code>\n\n"
-        f"IPTV link:\n<code>{get_config('iptv_link') or '❌ սահմանված չէ'}</code>\n\n"
-        f"Ողջյունի նկար: {'✅ սահմանված է' if get_config('welcome_photo') else '❌ սահմանված չէ'}"
+        f"IPTV link:\n<code>{get_config('iptv_link') or '❌ не задано'}</code>\n\n"
+        f"Приветственное фото: {'✅ задано' if get_config('welcome_photo') else '❌ не задано'}"
     )
 
 
@@ -2454,10 +2454,10 @@ def set_link_cmd(message):
     try:
         new_link = message.text.split(maxsplit=1)[1].strip()
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setlink նոր_հղում")
+        bot.send_message(ADMIN_ID, "❌ Используй: /setlink новая_ссылка")
         return
     set_config('vpn_link', new_link)
-    bot.send_message(ADMIN_ID, f"✅ VPN հղումը թարմացվեց.\n<code>{new_link}</code>")
+    bot.send_message(ADMIN_ID, f"✅ VPN-ссылка обновлена:\n<code>{new_link}</code>")
 
 
 @bot.message_handler(commands=['setforum'])
@@ -2467,10 +2467,10 @@ def set_forum_cmd(message):
     try:
         new_link = message.text.split(maxsplit=1)[1].strip()
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setforum նոր_հղ��ւմ")
+        bot.send_message(ADMIN_ID, "❌ Используй: /setforum новая_ссылка")
         return
     set_config('forum_link', new_link)
-    bot.send_message(ADMIN_ID, f"✅ Forum հղումը թարմացվեց.\n<code>{new_link}</code>")
+    bot.send_message(ADMIN_ID, f"✅ Forum-ссылка обновлена:\n<code>{new_link}</code>")
 
 
 @bot.message_handler(commands=['setiptv'])
@@ -2480,10 +2480,10 @@ def set_iptv_cmd(message):
     try:
         new_link = message.text.split(maxsplit=1)[1].strip()
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /setiptv նոր_հղում")
+        bot.send_message(ADMIN_ID, "❌ Используй: /setiptv новая_ссылка")
         return
     set_config('iptv_link', new_link)
-    bot.send_message(ADMIN_ID, f"✅ IPTV հղումը թարմացվեց.\n<code>{new_link}</code>")
+    bot.send_message(ADMIN_ID, f"✅ IPTV-ссылка обновлена:\n<code>{new_link}</code>")
 
 
 # === ADMIN. WELCOME PHOTO (before /start) ===
@@ -2497,13 +2497,13 @@ def _save_welcome_photo(message):
     if not photo:
         bot.send_message(
             ADMIN_ID,
-            "❌ Ուղարկիր նկարը՝ caption-ում գրելով /setphoto,\n"
-            "կամ reply արա նկարին /setphoto հրամանով։"
+            "❌ Отправь фото, написав в caption /setphoto,\n"
+            "или сделай reply на фото командой /setphoto."
         )
         return
 
     set_config('welcome_photo', photo)
-    bot.send_message(ADMIN_ID, "✅ Ողջյունի նկարը թարմացվեց։ Այն ցուցադրվելու է /start-ից հետո, մինչև լեզվի ընտրությունը։")
+    bot.send_message(ADMIN_ID, "✅ Приветственное фото обновлено. Оно будет показываться после /start, до выбора языка.")
 
 
 @bot.message_handler(commands=['setphoto'])
@@ -2535,9 +2535,9 @@ def add_button_cmd(message):
     except Exception:
         bot.send_message(
             ADMIN_ID,
-            "❌ Ֆորմատ (առանց hy_/ru_ prefix-ների, պարզապես 4 մաս | -ով).\n"
-            "<code>/addbutton [կոճակի անունը հայերեն]|[կոճակի անունը ռուսերեն]|[պատասխանը հայերեն]|[պատասխանը ռուսերեն]</code>\n\n"
-            "Օրինակ.\n"
+            "❌ Формат (без префиксов hy_/ru_, просто 4 части через |):\n"
+            "<code>/addbutton [название кнопки hy]|[название кнопки ru]|[ответ hy]|[ответ ru]</code>\n\n"
+            "Пример:\n"
             "<code>/addbutton 🔒 Անվ��անգություն|🔒 Безопасность|Երբեք մի օգտագործեք VPN-ը հանրա��ին WiFi-ում առանց...|Ник��гда не используйте VPN в публичном WiFi без...</code>"
         )
         return
@@ -2546,7 +2546,7 @@ def add_button_cmd(message):
         "INSERT INTO custom_buttons (label_hy, label_ru, response_hy, response_ru) VALUES (%s, %s, %s, %s)",
         (label_hy, label_ru, resp_hy, resp_ru), commit=True
     )
-    bot.send_message(ADMIN_ID, f"✅ Կոճակ ավելացվեց՝ «{label_hy}» / «{label_ru}»")
+    bot.send_message(ADMIN_ID, f"✅ Кнопка добавлена: «{label_hy}» / «{label_ru}»")
 
 
 @bot.message_handler(commands=['listbuttons'])
@@ -2555,12 +2555,12 @@ def list_buttons_cmd(message):
         return
     rows = db_execute("SELECT id, label_hy, label_ru FROM custom_buttons", fetchall=True) or []
     if not rows:
-        bot.send_message(ADMIN_ID, "ℹ️ Ավել��ցված custom կոճակներ չկան։")
+        bot.send_message(ADMIN_ID, "ℹ️ Добавленных custom-кнопок нет.")
         return
-    text = "📋 <b>Custom կոճակներ.</b>\n\n" + "\n".join(
+    text = "📋 <b>Custom-кнопки:</b>\n\n" + "\n".join(
         f"<code>{bid}</code>. {hy} / {ru}" for bid, hy, ru in rows
     )
-    text += "\n\nՀեռացնելու համար. /removebutton ID"
+    text += "\n\nЧтобы удалить: /removebutton ID"
     bot.send_message(ADMIN_ID, text)
 
 
@@ -2571,10 +2571,10 @@ def remove_button_cmd(message):
     try:
         button_id = int(message.text.split(maxsplit=1)[1].strip())
     except Exception:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /removebutton ID (տես /listbuttons)")
+        bot.send_message(ADMIN_ID, "❌ Используй: /removebutton ID (смотри /listbuttons)")
         return
     db_execute("DELETE FROM custom_buttons WHERE id = %s", (button_id,), commit=True)
-    bot.send_message(ADMIN_ID, f"✅ Կոճակ {button_id} հ��ռացվեց։")
+    bot.send_message(ADMIN_ID, f"✅ Кнопка {button_id} удалена.")
 
 
 # === ADMIN. SUB ֆայլի կառավարում GitHub-ի միջոցով ===
@@ -2585,7 +2585,7 @@ def update_sub_cmd(message):
     try:
         new_content = message.text.split(maxsplit=1)[1]
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /update_sub [ամբողջ նոր տեքստը]")
+        bot.send_message(ADMIN_ID, "❌ Используй: /update_sub [весь новый текст]")
         return
 
     try:
@@ -2598,10 +2598,10 @@ def update_sub_cmd(message):
         )
         bot.send_message(
             ADMIN_ID,
-            f"✅ sub ֆայլը թարմացվեց!\n\nԹարմացված տեքստը (առաջին 200 նիշ).\n{new_content[:200]}..."
+            f"✅ sub-файл обновлён!\n\nОбновлённый текст (первые 200 символов):\n{new_content[:200]}..."
         )
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
 
 
 @bot.message_handler(commands=['append_sub'])
@@ -2611,7 +2611,7 @@ def append_sub_cmd(message):
     try:
         new_line = message.text.split(maxsplit=1)[1]
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /append_sub [նոր սերվերի հղումը]")
+        bot.send_message(ADMIN_ID, "❌ Используй: /append_sub [ссылка нового сервера]")
         return
 
     try:
@@ -2626,9 +2626,9 @@ def append_sub_cmd(message):
             content=new_content,
             sha=contents.sha,
         )
-        bot.send_message(ADMIN_ID, f"✅ Նոր սերվերն ավելացվեց ֆայլի վերջում:\n\n{new_line[:80]}...")
+        bot.send_message(ADMIN_ID, f"✅ Новый сервер добавлен в конец файла:\n\n{new_line[:80]}...")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
 
 
 @bot.message_handler(commands=['delete_sub_keyword'])
@@ -2638,7 +2638,7 @@ def delete_sub_keyword_cmd(message):
     try:
         keyword = message.text.split(maxsplit=1)[1]
     except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Օգտագործիր՝ /delete_sub_keyword [հիմնաբառ]")
+        bot.send_message(ADMIN_ID, "❌ Используй: /delete_sub_keyword [ключевое слово]")
         return
 
     try:
@@ -2646,13 +2646,13 @@ def delete_sub_keyword_cmd(message):
         lines = contents.decoded_content.decode('utf-8').split('\n')
         new_lines = [line for line in lines if keyword not in line]
         if len(new_lines) == len(lines):
-            bot.send_message(ADMIN_ID, f"⚠️ '{keyword}' հիմնաբառով սերվեր չի գտնվել:")
+            bot.send_message(ADMIN_ID, f"⚠️ Сервер с ключевым словом '{keyword}' не найден.")
             return
         new_content = '\n'.join(new_lines)
         repo.update_file(contents.path, f"Deleted containing: {keyword}", new_content, contents.sha)
-        bot.send_message(ADMIN_ID, f"✅ Ջնջվեց '{keyword}' պարունակող տողը:")
+        bot.send_message(ADMIN_ID, f"✅ Удалена строка, содержащая '{keyword}'.")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
 
 
 def extract_server_name(line):
@@ -2701,7 +2701,7 @@ def list_and_delete(message):
         repo, contents = get_sub_file_contents()
         lines = contents.decoded_content.decode('utf-8').split('\n')
         if not lines:
-            bot.send_message(ADMIN_ID, "ℹ️ Ֆայլը դատարկ է:")
+            bot.send_message(ADMIN_ID, "ℹ️ Файл пуст.")
             return
         
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -2727,24 +2727,24 @@ def list_and_delete(message):
             buttons.append(types.InlineKeyboardButton(display_text, callback_data=f"del_line_{i}"))
         
         if not buttons:
-            bot.send_message(ADMIN_ID, "ℹ️ Ջնջելու սերվեր չկա:")
+            bot.send_message(ADMIN_ID, "ℹ️ Нет серверов для удаления.")
             return
         
         markup.add(*buttons)
         bot.send_message(
             ADMIN_ID, 
-            f"👇 Ընտրել սերվերը ջնջելու համար:\n\n💡 <i>Ընդամենը {config_count} հատ configuration</i>", 
+            f"👇 Выбери сервер для удаления:\n\n💡 <i>Всего {config_count} конфигураций</i>",
             reply_markup=markup,
             parse_mode="HTML"
         )
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('del_line_'))
 def process_delete_line(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Միայ�� ադմինը կարող է:")
+        bot.answer_callback_query(call.id, "Только админ может это делать")
         return
     try:
         line_index = int(call.data.split('_')[2])
@@ -2756,12 +2756,12 @@ def process_delete_line(call):
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            text=f"✅ {line_index + 1}-րդ տողը ջնջվեց!",
+            text=f"✅ Строка {line_index + 1} удалена!",
             reply_markup=None,
         )
         bot.answer_callback_query(call.id)
     except Exception as e:
-        bot.answer_callback_query(call.id, f"Սխալ: {str(e)}")
+        bot.answer_callback_query(call.id, f"Ошибка: {str(e)}")
 
 
 @bot.message_handler(commands=['show_sub'])
@@ -2787,17 +2787,17 @@ def show_sub(message):
                 servers.append(f"{i + 1}. [{protocol or 'UNKNOWN'}] {display_name}")
         
         # Format output
-        formatted = "📋 <b>METADATA / ԿԱՐԳԱՎՈՐՈՒՄՆԵՐ:</b>\n"
+        formatted = "📋 <b>METADATA / НАСТРОЙКИ:</b>\n"
         formatted += "\n".join(metadata) if metadata else "  (없음)"
-        formatted += "\n\n🖥️ <b>SERVERS / ՍԵՐՎԵՐՆԵՐ ({} հատ):</b>\n".format(len(servers))
-        formatted += "\n".join(servers) if servers else "  (Կա չ)"
+        formatted += "\n\n🖥️ <b>SERVERS / СЕРВЕРЫ ({} шт.):</b>\n".format(len(servers))
+        formatted += "\n".join(servers) if servers else "  (Пусто)"
         
         # Telegram-ի հաղորդագրության սահմանաչափի պատճառով բաժանում ենք մասերի, եթե երկար է
-        chunks = [formatted[i:i + 3500] for i in range(0, len(formatted), 3500)] or ["(դատարկ)"]
+        chunks = [formatted[i:i + 3500] for i in range(0, len(formatted), 3500)] or ["(пусто)"]
         for chunk in chunks:
             bot.send_message(ADMIN_ID, chunk, parse_mode="HTML")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Սխալ: {str(e)}")
+        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
 
 
 @bot.message_handler(commands=['clear_sub'])
@@ -2806,19 +2806,19 @@ def clear_sub_cmd(message):
         return
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("✅ Այո, ջնջել բոլորը", callback_data="confirm_clear_sub"),
-        types.InlineKeyboardButton("❌ Չեղարկել", callback_data="cancel_clear_sub"),
+        types.InlineKeyboardButton("✅ Да, удалить все", callback_data="confirm_clear_sub"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear_sub"),
     )
-    bot.send_message(ADMIN_ID, "⚠️ Դուք պատրաստվում եք ջնջել ԲՈԼՈՐ սերվ��ր��երը։\nՀամոզվա՞ծ եք։", reply_markup=markup)
+    bot.send_message(ADMIN_ID, "⚠️ Вы собираетесь удалить ВСЕ серверы.\nУверены?", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("confirm_clear_sub", "cancel_clear_sub"))
 def process_clear_sub(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Միայն ադմինը կարող է:")
+        bot.answer_callback_query(call.id, "Только админ может это делать")
         return
     if call.data == "cancel_clear_sub":
-        bot.edit_message_text("❌ Չեղարկվեց։", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        bot.edit_message_text("❌ Отменено.", chat_id=call.message.chat.id, message_id=call.message.message_id)
         bot.answer_callback_query(call.id)
         return
     try:
@@ -2828,14 +2828,14 @@ def process_clear_sub(call):
         new_content = '\n'.join(new_lines)
         repo.update_file(contents.path, "Cleared all servers", new_content, contents.sha)
         bot.edit_message_text(
-            "✅ Բոլոր սերվերները ջնջվեցին։\nՄնացին միայն վերնագրերը։\n"
-            "Նոր սերվերներ ավելացնելու համար օգտագործիր /update_sub կամ /append_sub",
+            "✅ Все серверы удалены.\nОстались только заголовки.\n"
+            "Для добавления новых серверов используй /update_sub или /append_sub",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
         )
         bot.answer_callback_query(call.id)
     except Exception as e:
-        bot.answer_callback_query(call.id, f"Սխալ: {str(e)}")
+        bot.answer_callback_query(call.id, f"Ошибка: {str(e)}")
 
 
 @bot.message_handler(func=lambda m: db_execute(
@@ -2976,13 +2976,13 @@ def forward_to_admin(message):
                                 (message.chat.id,), fetchone=True)
             fb_rating = fb_row[0] if fb_row and fb_row[0] else 0
             fb_user = message.from_user
-            fb_username = f"@{fb_user.username}" if fb_user.username else "(username չկա)"
+            fb_username = f"@{fb_user.username}" if fb_user.username else "(нет username)"
             try:
                 bot.send_message(
                     ADMIN_ID,
-                    f"⭐ <b>Նոր feedback</b>\n"
+                    f"⭐ <b>Новый отзыв</b>\n"
                     f"👤 ID: <code>{fb_user.id}</code> {fb_username}\n"
-                    f"Գնահատական՝ {'⭐' * fb_rating} ({fb_rating}/5)\n\n"
+                    f"Оценка: {'⭐' * fb_rating} ({fb_rating}/5)\n\n"
                     f"💬 {fb_escape(comment)}",
                     parse_mode="HTML"
                 )
@@ -3014,15 +3014,15 @@ def forward_to_admin(message):
         return
 
     user = message.from_user
-    username = f"@{user.username}" if user.username else "(username չկա)"
+    username = f"@{user.username}" if user.username else "(нет username)"
     profile_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
 
     info = (
-        f"✉️ <b>Նոր հաղորդագրություն</b>\n"
+        f"✉️ <b>Новое сообщение</b>\n"
         f"👤 <b>ID:</b> <code>{user.id}</code>\n"
         f"👤 <b>Username:</b> {username}\n"
-        f"🔗 <a href=\"{profile_link}\">Profile-ը բացել</a>\n\n"
-        f"↩️ Պատասխանելու համար. <code>/reply {user.id} տեքստ</code>"
+        f"🔗 <a href=\"{profile_link}\">Открыть профиль</a>\n\n"
+        f"↩️ Чтобы ответить: <code>/reply {user.id} текст</code>"
     )
     try:
         bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
@@ -3046,14 +3046,14 @@ def force_support(call):
         return
     uid = pending['user_id']
     uname = pending.get('username')
-    username = f"@{uname}" if uname else ("(username չկա)" if lang == 'hy' else "(нет username)")
+    username = f"@{uname}" if uname else "(нет username)"
     profile_link = f"https://t.me/{uname}" if uname else f"tg://user?id={uid}"
     info = (
-        f"✉️ <b>Նոր հաղորդագրություն (FAQ-ից հետո)</b>\n"
+        f"✉️ <b>Новое сообщение (после FAQ)</b>\n"
         f"👤 <b>ID:</b> <code>{uid}</code>\n"
         f"👤 <b>Username:</b> {username}\n"
-        f"🔗 <a href=\"{profile_link}\">Profile-ը բացել</a>\n\n"
-        f"↩️ Պատասխանելու համար. <code>/reply {uid} ��եքստ</code>"
+        f"🔗 <a href=\"{profile_link}\">Открыть профиль</a>\n\n"
+        f"↩️ Чтобы ответить: <code>/reply {uid} текст</code>"
     )
     try:
         bot.send_message(ADMIN_ID, info, parse_mode="HTML", disable_web_page_preview=True)
@@ -3272,8 +3272,8 @@ def check_all_servers():
         try:
             bot.send_message(
                 ADMIN_ID,
-                "🚨 <b>ԱՀԱԶԱՆԳ:</b> Բոլոր սերվերները միաժամանակ անհասանելի են "
-                "(հնարավոր է կապի կամ պրովայդերի խնդիր է)։\nԱվտոմատ ջնջումը կասեցվել է՝ ֆայլը պահպանելու համար:",
+                "🚨 <b>ТРЕВОГА:</b> Все серверы одновременно недоступны "
+                "(возможно, проблема сети или провайдера).\nАвтоудаление приостановлено, чтобы файл не опустел.",
                 parse_mode="HTML"
             )
         except Exception:
@@ -3306,7 +3306,7 @@ def check_all_servers():
             try:
                 bot.send_message(
                     ADMIN_ID,
-                    f"⚠️ Ավտոմատ կասեցվեց ոչ աշխատող սերվեր՝ {protocol or 'UNKNOWN'} {name or line[:50]}\n(Տողը դարձել է comment ֆայլում)"
+                    f"⚠️ Автоматически отключён неработающий сервер: {protocol or 'UNKNOWN'} {name or line[:50]}\n(Строка закомментирована в файле)"
                 )
             except Exception:
                 log.exception("Չհաջողվեց ադմինին ծանուցել կասեցված սերվերի մասին")
