@@ -793,7 +793,7 @@ def get_member_no(user_id):
 
 
 def send_main_menu(chat_id, lang, message_id=None):
-    """Գլխավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
+    """Գ��խավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
     hello = tr(lang, "Ընտրիր բաժինը 👇", "Выбери раздел 👇", "Choose a section 👇")
     no = get_member_no(chat_id)
     no_line = ""
@@ -1742,7 +1742,7 @@ def sec_rate(chat_id, lang, message_id=None):
 
 
 def sec_reviews(chat_id, lang, message_id=None):
-    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկնաբանությունները։"""
+    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկնաբանո��թյունները։"""
     stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
     total = stats[0] if stats and stats[0] else 0
     title = tr(lang, "Կարծիքներ", "Отзывы", "Reviews")
@@ -1783,7 +1783,7 @@ def sec_reviews(chat_id, lang, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
 def rate_callback(call):
-    """Աստղի սեղմում. պա��պանում ենք գնահատակա��ը և առաջարկում մեկնաբանություն թողնել։"""
+    """Աստղի սեղմում. պա��պան��ւմ ենք գնահատակա��ը և առաջարկում մեկնաբանություն թողնել։"""
     lang = get_lang(call.from_user.id)
     try:
         rating = max(1, min(5, int(call.data[5:])))
@@ -2458,7 +2458,7 @@ def set_link_cmd(message):
         bot.send_message(ADMIN_ID, "❌ Используй: /setlink новая_ссылка")
         return
     set_config('vpn_link', new_link)
-    bot.send_message(ADMIN_ID, f"✅ VPN-ссылка обновлена:\n<code>{new_link}</code>")
+    bot.send_message(ADMIN_ID, f"✅ VPN-ссылка об��овлена:\n<code>{new_link}</code>")
 
 
 @bot.message_handler(commands=['setforum'])
@@ -3186,21 +3186,14 @@ def _b64_header(text):
     return "base64:" + base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _sub_info_entry(name):
-    """«Ինֆո-սերվեր». կեղծ VLESS հղում (127.0.0.1), որի անունը Hiddify-ը
-    ցույց է տալիս սերվերների ցանկում՝ իրական սերվերներից ՎԵՐԵՎ։"""
-    return ("vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443"
-            "?type=tcp&security=none#" + quote(name))
-
-
-def _sub_info_block():
-    lines = [
-        "📢 Канал: t.me/vedavpn",
-        "💬 Форум: t.me/vedavpnforum",
-        "🛠 Поддержка: t.me/VedaSupport",
-        "🔄 Если VPN не работает — нажмите кнопку обновления",
-    ]
-    return "\n".join(_sub_info_entry(l) for l in lines)
+# Announce տեքստը երևում է պրոֆիլի անվան հենց տակ (Happ-ի ձևով)։
+# Սահմանափակում՝ առավելագույնը 200 նիշ ցուցադրվող տեքստ։
+SUB_ANNOUNCE = (
+    "📢 Канал: t.me/vedavpn\n"
+    "💬 Форум: t.me/vedavpnforum\n"
+    "🛠 Поддержка: t.me/VedaSupport\n"
+    "🔄 Если VPN не работает — нажмите кнопку обновления"
+)
 
 
 def _sub_extract_body(resp):
@@ -3246,8 +3239,7 @@ def get_sub_personal(token):
         f"#profile-update-interval: {SUB_UPDATE_INTERVAL_HOURS}",
         f"#support-url: {SUB_SUPPORT_URL}",
         f"#profile-web-page-url: {SUB_CHANNEL_URL}",
-        "",
-        _sub_info_block(),
+        f"#announce: {_b64_header(SUB_ANNOUNCE)}",
         "",
         servers.strip(),
         "",
@@ -3265,6 +3257,8 @@ def get_sub_personal(token):
     resp.headers["Profile-Web-Page-URL"] = SUB_CHANNEL_URL
     # Fallback անուն Clash-համատեղելի client-ների համար
     resp.headers["Content-Disposition"] = 'attachment; filename="vedavpn.txt"'
+    # Announce (Happ). տեքստը երևում է պրոֆիլի անվան հենց տակ
+    resp.headers["Announce"] = _b64_header(SUB_ANNOUNCE)
 
     # Subscription-Userinfo. Hiddify-ի համար ԲՈԼՈՐ 4 դաշտերը պարտադիր են,
     # այլապես ամբողջ header-ը դեն է նետվում (և Support/Web կոճակներն էլ չեն երևում)։
