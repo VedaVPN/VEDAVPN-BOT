@@ -73,7 +73,11 @@ app = Flask(__name__)
 # 3X-UI PANEL API (VPN subscription management)
 # Render-ը մնում է ՄԻԱՅՆ բոտի համար; subscription-ը ամբողջությամբ 3X-UI-ից է։
 # Ոչ մի GitHub, ոչ մի Flask /sub endpoint, ոչ մի սեփական subscription server։
-XUI_BASE_URL = os.environ.get("XUI_BASE_URL", "").rstrip("/")        # օր. https://panel.example.com:2053/secretpath
+XUI_BASE_URL = os.environ.get("XUI_BASE_URL", "").rstrip("/")        # օր. https://panel.example.com:2053
+# Panel-ի «գաղտնի» base path-ը (3X-UI-ի «URI Path»), օր. lqr0K06TbPb3hLOJ1M —
+# բոլոր հարցումները (/login, /panel/api/... և այլն) ավտոմատ կկառուցվեն դրա տակ՝
+# https://host:port/<XUI_BASE_PATH>/login, https://host:port/<XUI_BASE_PATH>/panel/api/...
+XUI_BASE_PATH = os.environ.get("XUI_BASE_PATH", "").strip().strip("/")
 XUI_USERNAME = os.environ.get("XUI_USERNAME", "")
 XUI_PASSWORD = os.environ.get("XUI_PASSWORD", "")
 XUI_INBOUND_ID = int(os.environ.get("XUI_INBOUND_ID", "1"))
@@ -94,10 +98,18 @@ class XUIClient:
     # ստուգումն անջատում ենք (հակառակ դեպքում կստանանք SSLError)։
     VERIFY_TLS = False
 
-    def __init__(self, base_url, username, password):
+    def __init__(self, base_url, username, password, base_path=""):
         base_url = (base_url or "").rstrip("/")
         if base_url and not base_url.startswith(("http://", "https://")):
             base_url = "https://" + base_url
+        # Custom base path (3X-UI-ի «URI Path»), օր. lqr0K06TbPb3hLOJ1M։
+        # Ընդունում ենք և՛ "lqr0K06TbPb3hLOJ1M", և՛ "/lqr0K06TbPb3hLOJ1M/" ձևերը։
+        base_path = (base_path or "").strip().strip("/")
+        # Back-compat. եթե base_url-ն ԱՐԴԵՆ ավարտվում է նույն path-ով
+        # (հին ձևը՝ XUI_BASE_URL=https://host:port/secretpath), կրկնակի չենք ավելացնում։
+        if base_path and urlparse(base_url).path.rstrip("/").endswith("/" + base_path):
+            base_path = ""
+        self.base_path = base_path
         self.base_url = base_url
         self.username = username
         self.password = password
@@ -119,7 +131,12 @@ class XUIClient:
         return url
 
     def _url(self, path):
-        return f"{self.base_url}/{path.lstrip('/')}"
+        """Կառուցում է վերջնական URL-ը՝ base_url + base_path + path։
+        ԲՈԼՈՐ հարցումները (login, panel/api/... և այլն) անցնում են միայն այս
+        ֆունկցիայով, այնպես որ ոչ մի endpoint root-ից չի կառուցվում, երբ
+        XUI_BASE_PATH-ը սահմանված է։"""
+        prefix = f"{self.base_url}/{self.base_path}" if self.base_path else self.base_url
+        return f"{prefix}/{path.lstrip('/')}"
 
     def _log_req(self, method, url, kwargs):
         body = kwargs.get("json", kwargs.get("data"))
@@ -171,12 +188,12 @@ class XUIClient:
         if not (ok and has_cookie):
             raise XUIError(
                 "3X-UI login failed (success=%s, cookie=%s) — "
-                "check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL and http/https scheme"
+                "check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL/XUI_BASE_PATH and http/https scheme"
                 % (ok, has_cookie)
             )
         self._logged_in = True
-        log.info("3X-UI login OK | base=%s | cookies=%s",
-                 self.base_url, list(self.session.cookies.keys()))
+        log.info("3X-UI login OK | base=%s | path=%s | cookies=%s",
+                 self.base_url, self.base_path or "-", list(self.session.cookies.keys()))
 
     def _request(self, method, path, **kwargs):
         with self._lock:
@@ -262,7 +279,8 @@ def get_xui():
             if _xui_client is None:
                 if not (XUI_BASE_URL and XUI_USERNAME and XUI_PASSWORD):
                     raise XUIError("3X-UI не настроен (XUI_BASE_URL/XUI_USERNAME/XUI_PASSWORD)")
-                _xui_client = XUIClient(XUI_BASE_URL, XUI_USERNAME, XUI_PASSWORD)
+                _xui_client = XUIClient(XUI_BASE_URL, XUI_USERNAME, XUI_PASSWORD,
+                                        base_path=XUI_BASE_PATH)
     return _xui_client
 
 
@@ -1096,7 +1114,7 @@ def build_info_markup(lang):
 
 
 def build_back_markup(lang, callback_data="info_back"):
-    """«⬅️ Հետ» + «🏠 Գլխավոր մենյու» կոճակներ՝ inline ենթաէջերի համար։"""
+    """«⬅️ Հետ» + «🏠 Գլխա��որ մենյու» կոճակներ՝ inline ենթաէջերի համար։"""
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton(get_content("btn_back", lang), callback_data=callback_data),
