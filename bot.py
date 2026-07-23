@@ -1,3 +1,4 @@
+import base64
 import csv
 import hashlib
 import logging
@@ -17,7 +18,7 @@ import qrcode
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
-from flask import Flask, request, abort
+from flask import Flask, Response, request, abort
 from github import Github
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -541,7 +542,7 @@ CONTENT_EN = {
     'text_privacy': (
         "🔒 <b>Privacy Policy</b>\n\n"
         "<b>1. What data we collect</b>\n"
-        "• Your Telegram ID and username (if any)\n"
+        "��� Your Telegram ID and username (if any)\n"
         "• Chosen language and device type (Android/iPhone)\n"
         "• Referral data (who you invited / who invited you)\n"
         "• Messages sent to the bot (e.g. support requests)\n\n"
@@ -1782,7 +1783,7 @@ def sec_reviews(chat_id, lang, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
 def rate_callback(call):
-    """Աստղի սեղմում. պա��պանում ենք գնահատականը և առաջարկում մեկնաբանություն թողնել։"""
+    """Աստղի սեղմում. պա��պանում ենք գնահատակա��ը և առաջարկում մեկնաբանություն թողնել։"""
     lang = get_lang(call.from_user.id)
     try:
         rating = max(1, min(5, int(call.data[5:])))
@@ -2047,7 +2048,7 @@ def admin_panel(message):
         f"/unban ID — восстановить sub-ссылку пользователя ✅\n"
         f"/vip ID DAYS — выдать/продлить VIP 👑\n"
         f"/unvip ID — снять VIP ❌\n"
-        f"/refund ID — вернуть последний платёж Stars 💫\n"
+        f"/refund ID — вернуть пос��едний платёж Stars 💫\n"
         f"/broadcast текст (или фото/видео с /broadcast текст в caption) — отправить всем\n"
         f"/reply ID текст — ответить пользователю\n"
         f"/listkeys — показать все editable content key-и\n"
@@ -3165,10 +3166,58 @@ def get_vip_sub():
         return get_sub()
 
 
+# ============================================================
+# 📡 HIDDIFY / SING-BOX / MIHOMO SUBSCRIPTION HEADERS
+# /sub/<token>-ը վերադարձնում է ոչ միայն սերվերների ցանկը, այլև
+# HTTP header-ներ, որոնք Hiddify-ը ցույց է տալիս պրոֆիլի քարտում։
+# ============================================================
+SUB_PROFILE_TITLE = "🛡 VedaVPN"
+SUB_PROFILE_TITLE_VIP = "👑 VedaVPN VIP"
+SUB_CHANNEL_URL = "https://t.me/vedavpn"
+SUB_FORUM_URL = "https://t.me/vedavpnforum"
+SUB_SUPPORT_URL = "https://t.me/VedaSupport"
+SUB_UPDATE_INTERVAL_HOURS = 12       # պրոֆիլի ավտոթարմացում՝ ժամերով
+SUB_FAKE_TOTAL = 1099511627776       # 1 TB «քվոտա»՝ տրաֆիկի գծի համար
+SUB_DEFAULT_DAYS = 365               # ոչ-VIP «ժամկետ»՝ օրերով
+
+
+def _b64_header(text):
+    """Hiddify-ը UTF-8/էմոջի է ընդունում Profile-Title-ում «base64:» prefix-ով։"""
+    return "base64:" + base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _sub_info_entry(name):
+    """«Ինֆո-սերվեր». կեղծ VLESS հղում (127.0.0.1), որի անունը Hiddify-ը
+    ցույց է տալիս սերվերների ցանկում՝ իրական սերվերներից ՎԵՐԵՎ։"""
+    return ("vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443"
+            "?type=tcp&security=none#" + quote(name))
+
+
+def _sub_info_block():
+    lines = [
+        "📢 Канал: t.me/vedavpn",
+        "💬 Форум: t.me/vedavpnforum",
+        "🛠 Поддержка: t.me/VedaSupport",
+        "🔄 Если VPN не работает — нажмите кнопку обновления",
+    ]
+    return "\n".join(_sub_info_entry(l) for l in lines)
+
+
+def _sub_extract_body(resp):
+    """get_sub()/get_vip_sub()-ը վերադարձնում են tuple (body, status, headers).
+    Քաշում ենք միայն body-ն. եթե status-ը 200 չէ՝ None։"""
+    if isinstance(resp, tuple):
+        if len(resp) > 1 and resp[1] != 200:
+            return None
+        return resp[0]
+    return resp
+
+
 @app.route('/sub/<token>', methods=['GET'])
 def get_sub_personal(token):
-    """Անհատական sub հղում. նույն բովանդակությունն է, բայց per-user token-ով։
-    Թույլ է տալիս անջատել կոնկրետ օգտատիրոջ (/ban) և տեսնել՝ ով է իրականում օգտվում։"""
+    """Անհատական sub հղում՝ Hiddify/Clash subscription header-ներով։
+    1) ստուգում է token-ը (և ban-ը), 2) կարդում է sub ֆայլը GitHub-ից,
+    3) ավելացնում է ինֆո-տողերը, 4) վերադարձնում է Hiddify header-ներով։"""
     row = db_execute("SELECT user_id, banned FROM users WHERE sub_token = %s", (token,), fetchone=True)
     if not row:
         return "Not found", 404
@@ -3181,10 +3230,53 @@ def get_sub_personal(token):
         )
     except Exception:
         log.exception("sub fetch counter failed")
+
     # 👑 VIP օգտատերերը նույն հղումով ստանում են VIP սերվերները
-    if is_vip(row[0]):
-        return get_vip_sub()
-    return get_sub()
+    vip = is_vip(row[0])
+    servers = _sub_extract_body(get_vip_sub() if vip else get_sub())
+    if servers is None:
+        return "Upstream error", 502
+
+    title = SUB_PROFILE_TITLE_VIP if vip else SUB_PROFILE_TITLE
+
+    # Մարմնի սկզբի #-տողերը fallback են այն client-ների համար,
+    # որոնք մետատվյալները կարդում են ֆայլից, ոչ թե header-ներից։
+    body = "\n".join([
+        f"#profile-title: {_b64_header(title)}",
+        f"#profile-update-interval: {SUB_UPDATE_INTERVAL_HOURS}",
+        f"#support-url: {SUB_SUPPORT_URL}",
+        f"#profile-web-page-url: {SUB_CHANNEL_URL}",
+        "",
+        _sub_info_block(),
+        "",
+        servers.strip(),
+        "",
+    ])
+
+    resp = Response(body, mimetype="text/plain")
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    # Պրոֆիլի անունը (base64՝ էմոջիի համար)
+    resp.headers["Profile-Title"] = _b64_header(title)
+    # Ավտոթարմացման ինտերվալ (ժամ)
+    resp.headers["Profile-Update-Interval"] = str(SUB_UPDATE_INTERVAL_HOURS)
+    # «Support» կոճակ պրոֆիլում
+    resp.headers["Support-URL"] = SUB_SUPPORT_URL
+    # «Open web page» կոճակ՝ դեպի ալիք
+    resp.headers["Profile-Web-Page-URL"] = SUB_CHANNEL_URL
+    # Fallback անուն Clash-համատեղելի client-ների համար
+    resp.headers["Content-Disposition"] = 'attachment; filename="vedavpn.txt"'
+
+    # Subscription-Userinfo. Hiddify-ի համար ԲՈԼՈՐ 4 դաշտերը պարտադիր են,
+    # այլապես ամբողջ header-ը դեն է նետվում (և Support/Web կոճակներն էլ չեն երևում)։
+    if vip:
+        until = get_vip_until(row[0]) or (datetime.utcnow() + timedelta(days=31))
+    else:
+        until = datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
+    expire_ts = int((until - datetime(1970, 1, 1)).total_seconds())
+    resp.headers["Subscription-Userinfo"] = (
+        f"upload=0; download=0; total={SUB_FAKE_TOTAL}; expire={expire_ts}"
+    )
+    return resp
 
 
 
