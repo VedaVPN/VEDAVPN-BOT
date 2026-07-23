@@ -186,7 +186,7 @@ class XUIClient:
         """3X-UI v3.5.0+ CSRF token. GET /csrf-token → {"success": true, "obj": "<token>"}։
         Այս հարցումը սահմանում է նաև session cookie-ն, որը ՊԱՐՏԱԴԻՐ պետք է
         վերադառնա POST /login-ի հետ (նույն requests.Session-ը դա անում է ավտոմատ)։
-        Հին տար��երակներում (v2.x) endpoint-ը չկա → None (back-compat, առանց CSRF)։"""
+        Հին ��ար��երակներում (v2.x) endpoint-ը չկա → None (back-compat, առանց CSRF)։"""
         try:
             r = self._raw("GET", self._url("csrf-token"))
             if r.status_code == 200:
@@ -279,6 +279,10 @@ class XUIClient:
         return None
 
     def add_client(self, inbound_id, email, tg_id=0):
+        # Պաշտոնական 3X-UI v3.5.0 endpoint՝ POST /panel/api/clients/add
+        # (internal/web/controller/client.go՝ g.POST("/add", a.create))։
+        # Body՝ ClientCreatePayload = {"client": {...model.Client...}, "inboundIds": [id]}։
+        # Ուշադիր. v3.5.0-ում tgId-ն թիվ է (int64), ոչ թե string։
         client = {
             "id": str(uuid.uuid4()),
             "email": email,
@@ -287,12 +291,25 @@ class XUIClient:
             "limitIp": 0,
             "totalGB": 0,
             "expiryTime": 0,
-            "tgId": str(tg_id or ""),
+            "tgId": int(tg_id or 0),
             "subId": secrets.token_hex(8),
+            "comment": "",
             "reset": 0,
         }
-        payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
-        r = self._request("POST", "panel/api/inbounds/addClient", json=payload)
+        try:
+            r = self._request("POST", "panel/api/clients/add",
+                              json={"client": client, "inboundIds": [int(inbound_id)]})
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                # Back-compat. հին (v2.x) պանելներ՝ POST /panel/api/inbounds/addClient,
+                # որտեղ tgId-ն string է, իսկ settings-ը՝ JSON string։
+                log.info("3X-UI clients/add չկա (404) → fallback հին inbounds/addClient-ին")
+                legacy = {**client, "tgId": str(tg_id or "")}
+                payload = {"id": int(inbound_id),
+                           "settings": json.dumps({"clients": [legacy]})}
+                r = self._request("POST", "panel/api/inbounds/addClient", json=payload)
+            else:
+                raise
         data = r.json()
         if not data.get("success"):
             raise XUIError(f"addClient failed: {data.get('msg')}")
@@ -302,6 +319,18 @@ class XUIClient:
         client = self.find_client(inbound_id, email)
         if not client:
             return False
+        # Պաշտոնական v3.5.0 endpointներ՝ POST /panel/api/clients/bulkEnable | bulkDisable,
+        # body՝ {"emails": [email]}։
+        try:
+            endpoint = ("panel/api/clients/bulkEnable" if enabled
+                        else "panel/api/clients/bulkDisable")
+            self._request("POST", endpoint, json={"emails": [email]})
+            return True
+        except requests.exceptions.HTTPError as e:
+            if e.response is None or e.response.status_code != 404:
+                raise
+        # Back-compat. հին (v2.x) պանելներ՝ POST /panel/api/inbounds/updateClient/{uuid}։
+        log.info("3X-UI clients/bulkEnable չկա (404) → fallback հին updateClient-ին")
         client["enable"] = bool(enabled)
         payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
         self._request("POST", f"panel/api/inbounds/updateClient/{client['id']}", json=payload)
@@ -1827,7 +1856,7 @@ def wizard_router(call):
                   "3. Ընտրեք ցանկից մեկ այլ սերվեր (օրինակ 2-րդը) և փորձեք նորից միանալ:\n\n"
                   "Այս քայլերն օգնեցի՞ն լուծել խնդիրը:",
                   "🔧 <b>Попробуйте следующие шаги:</b>\n\n"
-                  "1. Убедитесь, что вы скопировали именно вашу личную ссылку.\n"
+                  "1. У��едитесь, что вы скопировали именно вашу личную ссылку.\n"
                   "2. Обновите (Update) список серверов в приложении.\n"
                   "3. Выберите другой сервер из списка (например, 2-й) и попробуйте подключиться снова.\n\n"
                   "Эти шаги помогли решить проблему?",
