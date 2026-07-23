@@ -121,6 +121,9 @@ class XUIClient:
         })
         self._lock = threading.Lock()
         self._logged_in = False
+        # CSRF token (3X-UI v3.5.0+). GET /csrf-token-ից ստացվող token-ը
+        # կցվում է X-CSRF-Token header-ով ԲՈԼՈՐ POST հարցումներին։
+        self._csrf_token = None
 
     @staticmethod
     def _swap_scheme(url):
@@ -153,6 +156,11 @@ class XUIClient:
                  r.status_code, dict(r.headers), text)
 
     def _raw(self, method, url, **kwargs):
+        # v3.5.0+ CSRF պաշտպանություն. ոչ-GET հարցումներին կցում ենք X-CSRF-Token header-ը
+        # (internal/web/middleware/security.go-ն 403 Forbidden է վերադարձնում առանց դրա)։
+        if method.upper() not in ("GET", "HEAD", "OPTIONS") and self._csrf_token:
+            headers = kwargs.setdefault("headers", {})
+            headers.setdefault("X-CSRF-Token", self._csrf_token)
         kwargs.setdefault("timeout", 15)
         kwargs.setdefault("verify", self.VERIFY_TLS)
         kwargs.setdefault("allow_redirects", False)
@@ -174,11 +182,42 @@ class XUIClient:
         self._log_resp(r)
         return r
 
+    def _fetch_csrf_token(self):
+        """3X-UI v3.5.0+ CSRF token. GET /csrf-token → {"success": true, "obj": "<token>"}։
+        Այս հարցումը սահմանում է նաև session cookie-ն, որը ՊԱՐՏԱԴԻՐ պետք է
+        վերադառնա POST /login-ի հետ (նույն requests.Session-ը դա անում է ավտոմատ)։
+        Հին տարբերակներում (v2.x) endpoint-ը չկա → None (back-compat, առանց CSRF)։"""
+        try:
+            r = self._raw("GET", self._url("csrf-token"))
+            if r.status_code == 200:
+                data = r.json()
+                obj = data.get("obj")
+                if data.get("success") and isinstance(obj, str) and obj:
+                    self._csrf_token = obj
+                    log.info("3X-UI CSRF token ստացվեց (len=%s)", len(obj))
+                    return obj
+            log.warning("3X-UI csrf-token endpoint-ը token չտվեց (status=%s) — "
+                        "շարունակում ենք առանց CSRF (հավանաբար հին տարբերակ է)", r.status_code)
+        except Exception as e:
+            log.warning("3X-UI csrf-token fetch failed (%s) — շարունակում ենք առանց CSRF", e)
+        self._csrf_token = None
+        return None
+
     def login(self):
-        # 3X-UI login → POST /login, form-data (ոչ JSON), պատասխանում է session cookie
+        # Պաշտոնական 3X-UI v3.5.0 login հոսքը (frontend/src/api/http-init.ts +
+        # internal/web/controller/index.go).
+        #   1) GET /csrf-token → session cookie + CSRF token
+        #   2) POST /login → application/x-www-form-urlencoded (ոչ JSON) +
+        #      X-CSRF-Token header + X-Requested-With: XMLHttpRequest
+        #   3) 403 → token-ը թարմացնում ենք և կրկնում մեկ անգամ (պաշտոնական frontend-ի auto-retry)
+        self._fetch_csrf_token()
         url = self._url("login")
-        r = self._raw("POST", url,
-                      data={"username": self.username, "password": self.password})
+        creds = {"username": self.username, "password": self.password}
+        r = self._raw("POST", url, data=creds)
+        if r.status_code == 403:
+            log.info("3X-UI login 403 → CSRF token-ը թարմացվում է, retry")
+            self._fetch_csrf_token()
+            r = self._raw("POST", url, data=creds)
         r.raise_for_status()
         try:
             ok = bool(r.json().get("success"))
@@ -188,7 +227,8 @@ class XUIClient:
         if not (ok and has_cookie):
             raise XUIError(
                 "3X-UI login failed (success=%s, cookie=%s) — "
-                "check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL/XUI_BASE_PATH and http/https scheme"
+                "check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL/XUI_BASE_PATH, http/https scheme; "
+                "եթե panel-ում 2FA է միացված՝ անջատիր այն bot-ի համար"
                 % (ok, has_cookie)
             )
         self._logged_in = True
@@ -663,7 +703,7 @@ CONTENT_DEFAULTS = {
             "• Ваш Telegram ID и, если есть, username\n"
             "• Выбранный язык и тип устройства (Android/iPhone)\n"
             "• Реферальные данные (кого вы пригласили / кем приглашены)\n"
-            "• Сообщения, отправленные боту (например, запросы в поддержку)\n\n"
+            "• Сообщения, отправленные боту (например, запросы в поддер��ку)\n\n"
             "<b>2. Для чего мы их используем</b>\n"
             "Эти данные используются исключительн�� для работы сервиса: проверки подписки на канал, ответа на нужном языке со ссылкой, подсчёта рефералов и обработки обращений в поддержку. Сообщения, отправленные в поддержку, пересылаются администратору вместе с вашим ID и ссылкой на профиль.\n\n"
             "<b>3. Что мы НЕ собираем</b>\n"
@@ -2039,7 +2079,7 @@ def sec_vip(chat_id, lang, message_id=None):
         body = tr(lang,
                   "🚀 Ավելի արագ VIP սերվերներ\n🛠 Առաջնահերթ աջակցություն\n🔗 Հղումդ մնում է նույնը՝ վճարումից հետո պարզապես թարմացրու սերվերների ցանկը հավելվածում։\n\nՎճարումը՝ Telegram Stars ⭐-ով 👇",
                   "🚀 Более быстрые VIP-серверы\n🛠 Приоритетная поддержка\n🔗 Ссылка остаётся той же — после оплаты просто обнови список серверов в приложении.\n\nОплата в Telegram Stars ⭐ 👇",
-                  "🚀 Faster VIP servers\n🛠 Priority support\n🔗 Your link stays the same — after payment just refresh the server list in the app.\n\nPayment in Telegram Stars ⭐ 👇")
+                  "🚀 Faster VIP servers\n��� Priority support\n🔗 Your link stays the same — after payment just refresh the server list in the app.\n\nPayment in Telegram Stars ⭐ 👇")
     markup = types.InlineKeyboardMarkup(row_width=1)
     # 🎁 Եթե օգտատերը դեռ չի օգտագործել փորձնականը, ցույց ենք տալիս կոճակը
     if not is_vip(chat_id) and not has_used_vip_trial(chat_id):
@@ -2957,7 +2997,7 @@ def forward_to_admin(message):
     profile_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
 
     info = (
-        f"✉️ <b>Новое сообщение</b>\n"
+        f"✉️ <b>Новое с��общение</b>\n"
         f"👤 <b>ID:</b> <code>{user.id}</code>\n"
         f"👤 <b>Username:</b> {username}\n"
         f"🔗 <a href=\"{profile_link}\">Открыть профиль</a>\n\n"
