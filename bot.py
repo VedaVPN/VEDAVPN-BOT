@@ -186,7 +186,7 @@ class XUIClient:
         """3X-UI v3.5.0+ CSRF token. GET /csrf-token → {"success": true, "obj": "<token>"}։
         Այս հարցումը սահմանում է նաև session cookie-ն, որը ՊԱՐՏԱԴԻՐ պետք է
         վերադառնա POST /login-ի հետ (նույն requests.Session-ը դա անում է ավտոմատ)։
-        Հին տարբերակներում (v2.x) endpoint-ը չկա → None (back-compat, առանց CSRF)։"""
+        Հին տար��երակներում (v2.x) endpoint-ը չկա → None (back-compat, առանց CSRF)։"""
         try:
             r = self._raw("GET", self._url("csrf-token"))
             if r.status_code == 200:
@@ -259,9 +259,20 @@ class XUIClient:
             raise XUIError(f"get inbound failed: {data.get('msg')}")
         return data["obj"]
 
+    @staticmethod
+    def _parse_settings(raw):
+        """3X-UI-ի inbound «settings» դաշտը հին տարբերակներում JSON string է,
+        v3.5.0+-ում՝ արդեն պարսած dict։ Երկուսն էլ ընդունում ենք՝
+        առանց կրկնակի json.loads()-ի (որը dict-ի վրա TypeError է տալիս)։"""
+        if isinstance(raw, dict):
+            return raw
+        if not raw:
+            return {}
+        return json.loads(raw)
+
     def find_client(self, inbound_id, email):
         obj = self.get_inbound(inbound_id)
-        settings = json.loads(obj.get("settings") or "{}")
+        settings = self._parse_settings(obj.get("settings"))
         for c in settings.get("clients", []):
             if c.get("email") == email:
                 return c
@@ -771,7 +782,7 @@ CONTENT_DEFAULTS = {
 }
 
 # === ENGLISH CONTENT ===
-# Անգլերեն տեքստերը առանձին dict-ում են, ապա merge են արվում CONTENT_DEFAULTS-ի մեջ։
+# Անգլերեն տեքստերը առանձին dict-ում են, ապ�� merge են արվում CONTENT_DEFAULTS-ի մեջ։
 CONTENT_EN = {
     'btn_get_vpn':   "🛡 Get VPN",
     'btn_referrals': "👥 Referrals",
@@ -1450,7 +1461,7 @@ def set_lang(call):
     elif lang == 'en':
         greeting = f"Hi, {name} 👋 Welcome to VedaVPN 🛡" if name else "Hi 👋 Welcome to VedaVPN 🛡"
     else:
-        greeting = f"Привет, {name} 👋 Добро пожаловать в VedaVPN 🛡" if name else "Привет 👋 Добро пожаловать в VedaVPN 🛡"
+        greeting = f"Привет, {name} 👋 Добро пожаловат�� в VedaVPN 🛡" if name else "Привет 👋 Добро пожаловать в VedaVPN 🛡"
     bot.send_message(call.from_user.id, greeting, reply_markup=types.ReplyKeyboardRemove())
     send_main_menu(call.from_user.id, lang)
 
