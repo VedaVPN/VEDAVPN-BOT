@@ -15,11 +15,13 @@ from urllib.parse import unquote, quote, urlparse
 import psycopg2
 import psycopg2.pool
 import qrcode
+import json
+import requests
+import uuid
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
-from flask import Flask, Response, request, abort
-from github import Github
+from flask import Flask, request, abort
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -29,28 +31,7 @@ TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID'))
 CHANNEL = '@vedavpn'
 FORUM_LINK_DEFAULT = 'https://t.me/vedavpnforum'
-VPN_LINK_DEFAULT = "https://pastebin.com/raw/քո_նոր_հղումը_այստեղ"
 
-# GitHub-ում պահվող sub ֆայլի կարգավորումներ (VPN բաժանորդագրության հղումի աղբյուր)
-GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-GITHUB_REPO = os.environ.get('GITHUB_REPO', 'VedaVPN/VEDAVPN-BOT')
-GITHUB_SUB_PATH = os.environ.get('GITHUB_SUB_PATH', 'sub')
-# 👑 VIP սերվերների առանձին sub ֆայլը GitHub-ում
-GITHUB_VIP_SUB_PATH = os.environ.get('GITHUB_VIP_SUB_PATH', 'sub_vip')
-
-
-def get_sub_file_contents():
-    """Օգնական ֆունկցիա՝ sub ֆայլի ընթացիկ contents օբյեկտը GitHub-ից բերելու համար։"""
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(GITHUB_REPO)
-    return repo, repo.get_contents(GITHUB_SUB_PATH)
-
-
-def get_vip_sub_file_contents():
-    """👑 VIP sub ֆայլի contents օբյեկտը GitHub-ից։"""
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(GITHUB_REPO)
-    return repo, repo.get_contents(GITHUB_VIP_SUB_PATH)
 
 # Supabase PostgreSQL connection string (Project Settings → Database → Connection string → URI)
 SUPABASE_URL = os.environ.get(
@@ -84,6 +65,200 @@ STORE_LINKS = {
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
 
 app = Flask(__name__)
+
+
+# 3X-UI PANEL API (VPN subscription management)
+# Render-ը մնում է ՄԻԱՅՆ բոտի համար; subscription-ը ամբողջությամբ 3X-UI-ից է։
+# Ոչ մի GitHub, ոչ մի Flask /sub endpoint, ոչ մի սեփական subscription server։
+XUI_BASE_URL = os.environ.get("XUI_BASE_URL", "").rstrip("/")        # օր. https://panel.example.com:2053/secretpath
+XUI_USERNAME = os.environ.get("XUI_USERNAME", "")
+XUI_PASSWORD = os.environ.get("XUI_PASSWORD", "")
+XUI_INBOUND_ID = int(os.environ.get("XUI_INBOUND_ID", "1"))
+# 3X-UI-ի native subscription հասցեն (subscription port + subPath), օր.
+# https://panel.example.com:2096/sub/  → վերջնական հղումը = XUI_SUB_BASE_URL + subId
+XUI_SUB_BASE_URL = os.environ.get("XUI_SUB_BASE_URL", "").rstrip("/")
+
+
+class XUIError(Exception):
+    pass
+
+
+class XUIClient:
+    """Փոքրիկ 3X-UI API client՝ session/cookie-ի ավտոմատ կառավարմամբ։"""
+
+    def __init__(self, base_url, username, password):
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.session = requests.Session()
+        self._lock = threading.Lock()
+        self._logged_in = False
+
+    def _url(self, path):
+        return f"{self.base_url}/{path.lstrip('/')}"
+
+    def login(self):
+        r = self.session.post(
+            self._url("login"),
+            data={"username": self.username, "password": self.password},
+            timeout=10,
+        )
+        r.raise_for_status()
+        try:
+            ok = r.json().get("success", False)
+        except Exception:
+            ok = False
+        if not ok:
+            raise XUIError("3X-UI login failed (check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL)")
+        self._logged_in = True
+
+    def _request(self, method, path, **kwargs):
+        with self._lock:
+            if not self._logged_in:
+                self.login()
+        r = self.session.request(method, self._url(path), timeout=15, **kwargs)
+        # Session-ը կարող է լրանալ → նորից login և կրկնում ենք մեկ անգամ
+        ctype = r.headers.get("content-type", "")
+        if r.status_code in (401, 403) or ctype.startswith("text/html"):
+            with self._lock:
+                self.login()
+            r = self.session.request(method, self._url(path), timeout=15, **kwargs)
+        r.raise_for_status()
+        return r
+
+    def get_inbound(self, inbound_id):
+        r = self._request("GET", f"panel/api/inbounds/get/{inbound_id}")
+        data = r.json()
+        if not data.get("success"):
+            raise XUIError(f"get inbound failed: {data.get('msg')}")
+        return data["obj"]
+
+    def find_client(self, inbound_id, email):
+        obj = self.get_inbound(inbound_id)
+        settings = json.loads(obj.get("settings") or "{}")
+        for c in settings.get("clients", []):
+            if c.get("email") == email:
+                return c
+        return None
+
+    def add_client(self, inbound_id, email, tg_id=0):
+        client = {
+            "id": str(uuid.uuid4()),
+            "email": email,
+            "enable": True,
+            "flow": "",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "tgId": str(tg_id or ""),
+            "subId": secrets.token_hex(8),
+            "reset": 0,
+        }
+        payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
+        r = self._request("POST", "panel/api/inbounds/addClient", json=payload)
+        data = r.json()
+        if not data.get("success"):
+            raise XUIError(f"addClient failed: {data.get('msg')}")
+        return client
+
+    def set_client_enabled(self, inbound_id, email, enabled):
+        client = self.find_client(inbound_id, email)
+        if not client:
+            return False
+        client["enable"] = bool(enabled)
+        payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
+        self._request("POST", f"panel/api/inbounds/updateClient/{client['id']}", json=payload)
+        return True
+
+    def get_or_create_client(self, inbound_id, email, tg_id=0):
+        client = self.find_client(inbound_id, email)
+        if client:
+            # Եթե client-ը գոյություն ունի, բայց անջատված է (disabled),
+            # ավտոմատ միացնում ենք նախքան subscription-ը վերադարձնելը։
+            if not client.get("enable", True):
+                self.set_client_enabled(inbound_id, email, True)
+                client["enable"] = True
+            return client
+        return self.add_client(inbound_id, email, tg_id)
+
+
+_xui_client = None
+_xui_client_lock = threading.Lock()
+
+
+def get_xui():
+    global _xui_client
+    if _xui_client is None:
+        with _xui_client_lock:
+            if _xui_client is None:
+                if not (XUI_BASE_URL and XUI_USERNAME and XUI_PASSWORD):
+                    raise XUIError("3X-UI не настроен (XUI_BASE_URL/XUI_USERNAME/XUI_PASSWORD)")
+                _xui_client = XUIClient(XUI_BASE_URL, XUI_USERNAME, XUI_PASSWORD)
+    return _xui_client
+
+
+def xui_email_for(user_id):
+    """Telegram user_id → 3X-UI client email (եզակի identifier)։"""
+    return f"VedaVPN_{user_id}"
+
+
+def get_subscription_url(user_id):
+    """Վերադարձնում է օգտատիրոջ 3X-UI native subscription URL-ը։
+    Անհրաժեշտության դեպքում 3X-UI-ում ստեղծում է նոր Client։"""
+    xui = get_xui()
+    email = xui_email_for(user_id)
+    client = xui.get_or_create_client(XUI_INBOUND_ID, email, tg_id=user_id)
+    sub_id = client.get("subId")
+    if not sub_id:
+        raise XUIError("client has no subId")
+    # Subscription URL-ը կազմվում է ՄԻԱՅՆ XUI_SUB_BASE_URL + subId-ով։
+    # Ոչ WEBHOOK_HOST, ոչ RENDER_EXTERNAL_URL, ոչ մի այլ հասցե՝ ոչ մի հատ fallback։
+    if not XUI_SUB_BASE_URL:
+        raise XUIError("XUI_SUB_BASE_URL is not set — subscription URL must be XUI_SUB_BASE_URL + subId")
+    return f"{XUI_SUB_BASE_URL}/{sub_id}"
+
+
+def _send_vpn_unavailable(chat_id, lang):
+    err = tr(lang,
+             "⚠️ VPN սերվերը ժամանակավորապես անհասանելի է։ Խնդրում ենք փորձել մի քանի րոպե հետ։",
+             "⚠️ VPN-сервер временно недоступен. Пожалуйста, попробуйте через несколько минут.",
+             "⚠️ The VPN server is temporarily unavailable. Please try again in a few minutes.")
+    try:
+        bot.send_message(chat_id, err, reply_markup=build_nav_markup(lang))
+    except Exception:
+        log.exception("failed to notify user %s about VPN outage", chat_id)
+
+
+def send_vpn_link(chat_id, lang):
+    # Հղումը լիովին գալիս է 3X-UI-ից (ոչ մի սեփական subscription server)։
+    show_typing(chat_id)
+    email = xui_email_for(chat_id)
+    try:
+        link = get_subscription_url(chat_id)
+    except requests.exceptions.RequestException as e:
+        status = getattr(getattr(e, "response", None), "status_code", "n/a")
+        log.error(
+            "3X-UI API error | tg_user_id=%s email=%s inbound_id=%s http_status=%s error=%s",
+            chat_id, email, XUI_INBOUND_ID, status, e,
+        )
+        _send_vpn_unavailable(chat_id, lang)
+        return
+    except Exception as e:
+        log.error(
+            "3X-UI error | tg_user_id=%s email=%s inbound_id=%s http_status=%s error=%s",
+            chat_id, email, XUI_INBOUND_ID, "n/a", e,
+        )
+        _send_vpn_unavailable(chat_id, lang)
+        return
+    caption = get_content("text_vpn_caption", lang).format(link=link)
+    qr_bio = generate_qr(link)
+    hide_main_menu(chat_id)
+    bot.send_photo(
+        chat_id, qr_bio, caption=caption,
+        reply_markup=build_app_markup(chat_id, lang),
+    )
+    done = tr(lang, "✅ Պատրաստ է՝ քո VPN հղումը վերևում է։", "✅ Готово — ваша VPN-ссылка выше.", "✅ Done — your VPN link is above.")
+    bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
 
 
 # === DATABASE (PostgreSQL/Supabase via a reusable connection pool) ===
@@ -130,12 +305,8 @@ def init_db():
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS device TEXT", commit=True)
     # Գրանցման ամսաթիվ՝ «նոր օգտատերեր այսօր/շաբաթ» վիճակագրության համար
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()", commit=True)
-    # Անհատական sub հղումների սյուներ՝ token, ban, օգտագործման հաշվիչ
-    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_token TEXT", commit=True)
+    # Ban-ի դրոշ (3X-UI client-ը enable/disable անելու հետ համաժամեցվում է)
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT FALSE", commit=True)
-    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_fetches BIGINT DEFAULT 0", commit=True)
-    db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_sub_at TIMESTAMP", commit=True)
-    db_execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_sub_token ON users (sub_token)", commit=True)
     # Վերջին ակտիվության պահը՝ ավտոմատ ողջույնի համար
     db_execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP", commit=True)
     # Օգտատիրոջ հերթական համարը («Դու №N օգտատերն ես»)
@@ -618,7 +789,6 @@ def set_content(key, lang, value):
 
 # === CONFIG (non-language settings, e.g. the VPN link) ===
 CONFIG_DEFAULTS = {
-    'vpn_link': VPN_LINK_DEFAULT,
     'forum_link': FORUM_LINK_DEFAULT,
     'iptv_link': "",
     'welcome_photo': "",
@@ -645,30 +815,6 @@ def check_sub(user_id):
         return bot.get_chat_member(CHANNEL, user_id).status in ['member', 'administrator', 'creator']
     except Exception:
         return False
-
-
-def get_or_create_sub_token(user_id):
-    """Վերադարձնում է օգտատիրոջ անհատական sub token-ը, անհրաժեշտության դեպքում ստեղծում է։"""
-    row = db_execute("SELECT sub_token FROM users WHERE user_id = %s", (user_id,), fetchone=True)
-    if row and row[0]:
-        return row[0]
-    if not row:
-        return None
-    token = secrets.token_urlsafe(12)
-    db_execute(
-        "UPDATE users SET sub_token = %s WHERE user_id = %s AND sub_token IS NULL",
-        (token, user_id), commit=True
-    )
-    row = db_execute("SELECT sub_token FROM users WHERE user_id = %s", (user_id,), fetchone=True)
-    return row[0] if row and row[0] else None
-
-
-def get_personal_sub_link(user_id):
-    """Անհատական sub հղում. եթե token ��կա, fallback՝ ընդհանուր հղումը։"""
-    token = get_or_create_sub_token(user_id)
-    if token:
-        return f"{WEBHOOK_HOST}/sub/{token}"
-    return get_config('vpn_link')
 
 
 def get_lang(user_id):
@@ -1019,22 +1165,6 @@ def maybe_greet(user_id, first_name):
         bot.send_message(user_id, time_greeting(lang, first_name))
     except Exception:
         log.exception("greeting failed")
-
-
-def send_vpn_link(chat_id, lang):
-    # Ամեն օգտատեր ստանում է ԻՐ անհատական հղումը (նույն բովանդակությամբ),
-    # ինչը թույլ է տալիս անհրաժեշտության դեպքում անջատել կոնկրետ օգտատիրոջ (/ban)։
-    link = get_personal_sub_link(chat_id)
-    caption = get_content('text_vpn_caption', lang).format(link=link)
-    qr_bio = generate_qr(link)
-    show_typing(chat_id)
-    hide_main_menu(chat_id)
-    bot.send_photo(
-        chat_id, qr_bio, caption=caption,
-        reply_markup=build_app_markup(chat_id, lang),
-    )
-    done = tr(lang, "✅ Պատրաստ է՝ քո VPN հղումը վերևում է։", "✅ Готово — ваша VPN-ссылка выше.", "✅ Done — your VPN link is above.")
-    bot.send_message(chat_id, done, reply_markup=build_nav_markup(lang))
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ("device_android", "device_ios"))
@@ -1497,8 +1627,6 @@ def iptv(message):
     sec_iptv(message.chat.id, lang)
 
 
-
-
 # === SUPPORT (wizard-style self-help before reaching the admin) ===
 def sec_support(chat_id, lang, message_id=None):
     title = tr(lang, "Խելացի Օգնական 🤖", "Умный Помощник 🤖", "Smart Assistant 🤖")
@@ -1810,9 +1938,7 @@ def rate_callback(call):
                  build_nav_markup(lang, back_callback="menu_rate"))
 
 
-# ============================================================
 # 👑 VIP ԲԱԺԻՆ, INVOICE ԵՎ ՎՃԱՐՈՒՄՆԵՐԻ ՄՇԱԿՈՒՄ (Telegram Stars)
-# ============================================================
 def sec_vip(chat_id, lang, message_id=None):
     """👑 VIP բաժինը՝ պլանով ու գնով, in-place նավիգացիայով։"""
     title = tr(lang, "VIP բաժանորդագրություն", "VIP подписка", "VIP subscription")
@@ -2055,7 +2181,6 @@ def admin_panel(message):
         f"/getcontent key — показать текущие hy/ru значения key\n"
         f"/setcontent key lang текст — изменить текст кнопки/сообщения\n"
         f"/getconfig — показать VPN/forum ссылки\n"
-        f"/setlink новая_ссылка — изменить VPN-ссылку\n"
         f"/setforum новая_ссылка — изменить forum-ссылку\n"
         f"/setiptv новая_ссылка — изменить IPTV-ссылку\n"
         f"/setphoto — установить приветственное фото (отправь фото с /setphoto в caption или сделай reply на фото)\n\n"
@@ -2063,13 +2188,6 @@ def admin_panel(message):
         f"/addbutton имя_hy|имя_ru|ответ_hy|ответ_ru — добавить новую кнопку (без префиксов, просто 4 части через |)\n"
         f"/listbuttons — показать добавленные кнопки\n"
         f"/removebutton ID — удалить кнопку\n\n"
-        f"<b>Управление sub-файлом (GitHub):</b>\n"
-        f"/update_sub [текст] — обновить весь sub-файл\n"
-        f"/append_sub [ссылка] — добавить новый сервер (без удаления)\n"
-        f"/delete_sub_keyword [ключевое слово] — удалить сервер\n"
-        f"/list_and_delete — показать серверы с кнопками\n"
-        f"/show_sub — показать содержимое файла\n"
-        f"/clear_sub — удалить все серверы"
     )
 
 
@@ -2137,13 +2255,13 @@ def export_users_cmd(message):
     if message.chat.id != ADMIN_ID:
         return
     rows = db_execute(
-        "SELECT user_id, lang, ref_by, ref_count, device, created_at, banned, sub_fetches, last_sub_at FROM users ORDER BY created_at",
+        "SELECT user_id, lang, ref_by, ref_count, device, created_at, banned FROM users ORDER BY created_at",
         fetchall=True
     ) or []
     from io import StringIO
     buf = StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["user_id", "lang", "ref_by", "ref_count", "device", "created_at", "banned", "sub_fetches", "last_sub_at"])
+    writer.writerow(["user_id", "lang", "ref_by", "ref_count", "device", "created_at", "banned"])
     for r in rows:
         writer.writerow(r)
     bio = BytesIO(buf.getvalue().encode('utf-8-sig'))
@@ -2189,6 +2307,10 @@ def ban_cmd(message):
         return
     uid = int(parts[1])
     db_execute("UPDATE users SET banned = TRUE WHERE user_id = %s", (uid,), commit=True)
+    try:
+        get_xui().set_client_enabled(XUI_INBOUND_ID, xui_email_for(uid), False)
+    except Exception:
+        log.exception("xui disable client failed")
     bot.send_message(ADMIN_ID, f"🚫 sub-ссылка пользователя <code>{uid}</code> отключена")
 
 
@@ -2203,6 +2325,10 @@ def unban_cmd(message):
         return
     uid = int(parts[1])
     db_execute("UPDATE users SET banned = FALSE WHERE user_id = %s", (uid,), commit=True)
+    try:
+        get_xui().set_client_enabled(XUI_INBOUND_ID, xui_email_for(uid), True)
+    except Exception:
+        log.exception("xui enable client failed")
     bot.send_message(ADMIN_ID, f"✅ sub-ссылка пользователя <code>{uid}</code> восстановлена")
 
 
@@ -2441,66 +2567,10 @@ def get_config_cmd(message):
     bot.send_message(
         ADMIN_ID,
         f"⚙️ <b>Текущий config:</b>\n\n"
-        f"VPN link:\n<code>{get_config('vpn_link')}</code>\n\n"
         f"Forum link:\n<code>{get_config('forum_link')}</code>\n\n"
         f"IPTV link:\n<code>{get_config('iptv_link') or '❌ не задано'}</code>\n\n"
         f"Приветственное фото: {'✅ задано' if get_config('welcome_photo') else '❌ не задано'}"
     )
-
-
-@bot.message_handler(commands=['setlink'])
-def set_link_cmd(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        new_link = message.text.split(maxsplit=1)[1].strip()
-    except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Используй: /setlink новая_ссылка")
-        return
-    set_config('vpn_link', new_link)
-    bot.send_message(ADMIN_ID, f"✅ VPN-ссылка об��овлена:\n<code>{new_link}</code>")
-
-
-@bot.message_handler(commands=['fixsub'])
-def fix_sub_cmd(message):
-    """Ադմին հրաման՝ GitHub-ի sub և sub_vip ֆայլերում մաքրում է հին #-մետատողերը
-    և տեղադրում թարմ profile-title/announce տողերը (raw հղումով օգտվողների համար)։"""
-    if message.chat.id != ADMIN_ID:
-        return
-    def _meta_lines(title):
-        # Փակ ֆայլը header ուղարկել չի կարող, դրա համար ինֆոն դնում ենք
-        # #subscription-userinfo տողով։ total=0 → 0В/∞, expire → «Истекает» ժամկետ։
-        expire_ts = int((datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
-                         - datetime(1970, 1, 1)).total_seconds())
-        return [
-            f"#profile-title: {_b64_header(title)}",
-            f"#profile-update-interval: {SUB_UPDATE_INTERVAL_HOURS}",
-            f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}",
-            f"#support-url: {SUB_SUPPORT_URL}",
-            f"#profile-web-page-url: {SUB_CHANNEL_URL}",
-            f"#announce: {_b64_header(SUB_ANNOUNCE)}",
-            "",
-        ]
-    results = []
-    for label, fetch, title in (
-        ("sub", get_sub_file_contents, SUB_PROFILE_TITLE),
-        ("sub_vip", get_vip_sub_file_contents, SUB_PROFILE_TITLE_VIP),
-    ):
-        try:
-            repo, contents = fetch()
-            old_content = contents.decoded_content.decode('utf-8')
-            server_lines = [l for l in old_content.splitlines()
-                            if l.strip() and not l.strip().startswith('#')]
-            new_content = "\n".join(_meta_lines(title) + server_lines) + "\n"
-            if new_content == old_content:
-                results.append(f"{label}: ✅ уже актуален")
-                continue
-            repo.update_file(contents.path, "Update subscription meta lines", new_content, contents.sha)
-            results.append(f"{label}: ✅ обновлён")
-        except Exception as e:
-            log(f"fixsub {label} error: {e}")
-            results.append(f"{label}: ❌ {e}")
-    bot.send_message(ADMIN_ID, "🔧 <b>GitHub sub файлы:</b>\n\n" + "\n".join(results))
 
 
 @bot.message_handler(commands=['setforum'])
@@ -2618,267 +2688,6 @@ def remove_button_cmd(message):
         return
     db_execute("DELETE FROM custom_buttons WHERE id = %s", (button_id,), commit=True)
     bot.send_message(ADMIN_ID, f"✅ Кнопка {button_id} удалена.")
-
-
-# === ADMIN. SUB ֆայլի կառավարում GitHub-ի միջոցով ===
-@bot.message_handler(commands=['update_sub'])
-def update_sub_cmd(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        new_content = message.text.split(maxsplit=1)[1]
-    except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Используй: /update_sub [весь новый текст]")
-        return
-
-    try:
-        repo, contents = get_sub_file_contents()
-        repo.update_file(
-            path=contents.path,
-            message="Update sub file via bot",
-            content=new_content,
-            sha=contents.sha,
-        )
-        bot.send_message(
-            ADMIN_ID,
-            f"✅ sub-файл обновлён!\n\nОбновлённый текст (первые 200 символов):\n{new_content[:200]}..."
-        )
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
-
-
-@bot.message_handler(commands=['append_sub'])
-def append_sub_cmd(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        new_line = message.text.split(maxsplit=1)[1]
-    except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Используй: /append_sub [ссылка нового сервера]")
-        return
-
-    try:
-        repo, contents = get_sub_file_contents()
-        current_content = contents.decoded_content.decode('utf-8')
-        if not current_content.endswith('\n'):
-            current_content += '\n'
-        new_content = current_content + new_line + '\n'
-        repo.update_file(
-            path=contents.path,
-            message="Appended new server via bot",
-            content=new_content,
-            sha=contents.sha,
-        )
-        bot.send_message(ADMIN_ID, f"✅ Новый сервер добавлен в конец файла:\n\n{new_line[:80]}...")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
-
-
-@bot.message_handler(commands=['delete_sub_keyword'])
-def delete_sub_keyword_cmd(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        keyword = message.text.split(maxsplit=1)[1]
-    except IndexError:
-        bot.send_message(ADMIN_ID, "❌ Используй: /delete_sub_keyword [ключевое слово]")
-        return
-
-    try:
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-        new_lines = [line for line in lines if keyword not in line]
-        if len(new_lines) == len(lines):
-            bot.send_message(ADMIN_ID, f"⚠️ Сервер с ключевым словом '{keyword}' не найден.")
-            return
-        new_content = '\n'.join(new_lines)
-        repo.update_file(contents.path, f"Deleted containing: {keyword}", new_content, contents.sha)
-        bot.send_message(ADMIN_ID, f"✅ Удалена строка, содержащая '{keyword}'.")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
-
-
-def extract_server_name(line):
-    """
-    Extract meaningful name from configuration line.
-    Supports: VLESS, VMESS, SS, SSR, Trojan, etc.
-    Returns: (name, protocol_type)
-    """
-    if not line.strip() or line.startswith('#'):
-        return None, None
-    
-    # Extract name after # for VLESS/VMESS
-    if '#' in line and line.startswith(('vless://', 'vmess://', 'ss://', 'trojan://', 'ssr://')):
-        try:
-            parts = line.split('#')
-            if len(parts) > 1:
-                name = unquote(parts[-1].strip())
-                if name:
-                    # Get protocol type
-                    protocol = line.split('://')[0].upper()
-                    return name, protocol
-        except:
-            pass
-    
-    # Fallback: use first meaningful part
-    if '://' in line:
-        try:
-            protocol = line.split('://')[0].upper()
-            # Try to extract a name or use shortened URL
-            if '#' in line:
-                name = unquote(line.split('#')[-1].strip())
-            else:
-                name = f"Server"
-            return name, protocol
-        except:
-            pass
-    
-    return None, None
-
-
-@bot.message_handler(commands=['list_and_delete'])
-def list_and_delete(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-        if not lines:
-            bot.send_message(ADMIN_ID, "ℹ️ Файл пуст.")
-            return
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        buttons = []
-        config_count = 0
-        
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
-            
-            # Skip metadata lines
-            if line.startswith('#'):
-                continue
-            
-            # Extract meaningful name
-            name, protocol = extract_server_name(line)
-            if not name:
-                name = "Unknown"
-            
-            config_count += 1
-            # Display: Protocol [#] Name
-            display_text = f"❌ [{config_count}] {protocol or 'CONFIG'}: {name[:40]}"
-            buttons.append(types.InlineKeyboardButton(display_text, callback_data=f"del_line_{i}"))
-        
-        if not buttons:
-            bot.send_message(ADMIN_ID, "ℹ️ Нет серверов для удаления.")
-            return
-        
-        markup.add(*buttons)
-        bot.send_message(
-            ADMIN_ID, 
-            f"👇 Выбери сервер для удаления:\n\n💡 <i>Всего {config_count} конфигураций</i>",
-            reply_markup=markup,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('del_line_'))
-def process_delete_line(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Только админ может это делать")
-        return
-    try:
-        line_index = int(call.data.split('_')[2])
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-        del lines[line_index]
-        new_content = '\n'.join(lines)
-        repo.update_file(contents.path, f"Deleted line {line_index + 1}", new_content, contents.sha)
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=f"✅ Строка {line_index + 1} удалена!",
-            reply_markup=None,
-        )
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"Ошибка: {str(e)}")
-
-
-@bot.message_handler(commands=['show_sub'])
-def show_sub(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    try:
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-        
-        # Separate metadata and actual servers
-        metadata = []
-        servers = []
-        
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
-            if line.startswith('#'):
-                metadata.append(f"{i + 1}. {line}")
-            else:
-                name, protocol = extract_server_name(line)
-                display_name = name if name else line[:50]
-                servers.append(f"{i + 1}. [{protocol or 'UNKNOWN'}] {display_name}")
-        
-        # Format output
-        formatted = "📋 <b>METADATA / НАСТРОЙКИ:</b>\n"
-        formatted += "\n".join(metadata) if metadata else "  (없음)"
-        formatted += "\n\n🖥️ <b>SERVERS / СЕРВЕРЫ ({} шт.):</b>\n".format(len(servers))
-        formatted += "\n".join(servers) if servers else "  (Пусто)"
-        
-        # Telegram-ի հաղորդագրության սահմանաչափի պատճառով բաժանում ենք մասերի, եթե երկար է
-        chunks = [formatted[i:i + 3500] for i in range(0, len(formatted), 3500)] or ["(пусто)"]
-        for chunk in chunks:
-            bot.send_message(ADMIN_ID, chunk, parse_mode="HTML")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Ошибка: {str(e)}")
-
-
-@bot.message_handler(commands=['clear_sub'])
-def clear_sub_cmd(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("✅ Да, удалить все", callback_data="confirm_clear_sub"),
-        types.InlineKeyboardButton("❌ Отм��на", callback_data="cancel_clear_sub"),
-    )
-    bot.send_message(ADMIN_ID, "⚠️ Вы собираетесь удалить ВСЕ серверы.\nУверены?", reply_markup=markup)
-
-
-@bot.callback_query_handler(func=lambda call: call.data in ("confirm_clear_sub", "cancel_clear_sub"))
-def process_clear_sub(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Только админ может это делать")
-        return
-    if call.data == "cancel_clear_sub":
-        bot.edit_message_text("❌ Отменено.", chat_id=call.message.chat.id, message_id=call.message.message_id)
-        bot.answer_callback_query(call.id)
-        return
-    try:
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-        new_lines = [line for line in lines if line.startswith('#')]
-        new_content = '\n'.join(new_lines)
-        repo.update_file(contents.path, "Cleared all servers", new_content, contents.sha)
-        bot.edit_message_text(
-            "✅ Все серверы удалены.\nОстались только заголовки.\n"
-            "Для добавления новых серверов используй /update_sub или /append_sub",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-        )
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"Ошибка: {str(e)}")
 
 
 @bot.message_handler(func=lambda m: db_execute(
@@ -3143,339 +2952,6 @@ def index():
     return 'VedaVPN bot is running ✅', 200
 
 
-# /sub-ի cache՝ GitHub-ից ամեն request-ի ժամանակ չբերելու համար
-_SUB_CACHE = {'content': None, 'ts': 0.0}
-_SUB_CACHE_TTL = 60  # seconds
-
-
-def get_sub():
-    # Sub ֆայլը բոտը խմբագրում է GitHub-ում, ուստի կարդում ենք հենց GitHub-ից
-    # (կարճ cache-ով), այլ ոչ թե deploy-ի պահի հին լոկալ պատճենից։
-    now = time.time()
-    if _SUB_CACHE['content'] is not None and now - _SUB_CACHE['ts'] < _SUB_CACHE_TTL:
-        return _SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
-    try:
-        repo, contents = get_sub_file_contents()
-        content = contents.decoded_content.decode('utf-8')
-        _SUB_CACHE['content'] = content
-        _SUB_CACHE['ts'] = now
-        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
-    except Exception:
-        log.exception("GitHub sub fetch failed")
-        # Fallback 1. հին cache
-        if _SUB_CACHE['content'] is not None:
-            return _SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
-        # Fallback 2. deploy-ի լոկալ ֆայլ (եթե կա)
-        file_path = os.path.join(os.path.dirname(__file__), 'sub')
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read(), 200, {'Content-Type': 'text/plain; charset=utf-8'}
-        except FileNotFoundError:
-            return "File not found", 404
-
-
-# VIP sub-ի cache՝ GitHub-ից ամեն request-ի ժամանակ չբերելու համար
-_VIP_SUB_CACHE = {'content': None, 'ts': 0.0}
-
-
-def get_vip_sub():
-    """👑 VIP sub ֆայլի պարունակությունը GitHub-ից (կարճ cache-ով)։
-    Եթե VIP ֆայլը բերել չհաջողվի՝ fallback հին cache-ին կամ սովորական sub-ին։"""
-    now = time.time()
-    if _VIP_SUB_CACHE['content'] is not None and now - _VIP_SUB_CACHE['ts'] < _SUB_CACHE_TTL:
-        return _VIP_SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
-    try:
-        repo, contents = get_vip_sub_file_contents()
-        content = contents.decoded_content.decode('utf-8')
-        # 👑 VIP օգտատերը ստանում են VIP + սովորական սերվերները միասին
-        try:
-            free_resp = get_sub()
-            if isinstance(free_resp, tuple) and free_resp[1] == 200:
-                free_lines = [l for l in free_resp[0].splitlines()
-                              if l.strip() and not l.strip().startswith('#')]
-                if free_lines:
-                    content = content.rstrip() + "\n" + "\n".join(free_lines) + "\n"
-        except Exception:
-            log.exception("append free sub to vip failed")
-        _VIP_SUB_CACHE['content'] = content
-        _VIP_SUB_CACHE['ts'] = now
-        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
-    except Exception:
-        log.exception("GitHub vip sub fetch failed")
-        if _VIP_SUB_CACHE['content'] is not None:
-            return _VIP_SUB_CACHE['content'], 200, {'Content-Type': 'text/plain; charset=utf-8'}
-        return get_sub()
-
-
-# ============================================================
-# 📡 HIDDIFY / SING-BOX / MIHOMO SUBSCRIPTION HEADERS
-# /sub/<token>-ը վերադարձնում է ոչ միայն սերվերների ցանկը, այլև
-# HTTP header-ներ, որոնք Hiddify-ը ցույց է տալիս պրոֆիլի քարտում։
-# ============================================================
-SUB_PROFILE_TITLE = "🛡 VedaVPN"
-SUB_PROFILE_TITLE_VIP = "👑 VedaVPN VIP"
-SUB_CHANNEL_URL = "https://t.me/vedavpn"
-SUB_FORUM_URL = "https://t.me/vedavpnforum"
-SUB_SUPPORT_URL = "https://t.me/vedavpn_bot"  # աջակցությունը բոտի մեջ է (🆘 կոճակ)
-SUB_UPDATE_INTERVAL_HOURS = 12       # պրոֆիլի ավտոթարմացում՝ ժամերով
-SUB_FAKE_TOTAL = 1099511627776       # 1 TB «քվոտա»՝ տրաֆիկի գծի համար
-SUB_DEFAULT_DAYS = 365               # ոչ-VIP «ժամկետ»՝ օրերով
-
-
-def _b64_header(text):
-    """Hiddify-ը UTF-8/էմոջի է ընդունում Profile-Title-ում «base64:» prefix-ով։"""
-    return "base64:" + base64.b64encode(text.encode("utf-8")).decode("ascii")
-
-
-# Announce տեքստը երևում է պրոֆիլի անվան հենց տակ (Happ-ի ձևով)։
-# Սահմանափակում՝ առավելագույնը 200 նիշ ցուցադրվող տեքստ։
-SUB_ANNOUNCE = (
-    "📢 Канал: t.me/vedavpn\n"
-    "💬 Форум: t.me/vedavpnforum\n"
-    "🛠 Поддержка: t.me/vedavpn_bot\n"
-    "🔄 Если VPN не работает — нажмите кнопку обновления"
-)
-
-
-def _sub_extract_body(resp):
-    """get_sub()/get_vip_sub()-ը վերադարձնում են tuple (body, status, headers).
-    Քաշում ենք միայն body-ն. եթե status-ը 200 չէ՝ None։"""
-    if isinstance(resp, tuple):
-        if len(resp) > 1 and resp[1] != 200:
-            return None
-        return resp[0]
-    return resp
-
-
-@app.route('/sub/<token>', methods=['GET'])
-def get_sub_personal(token):
-    """Անհատական sub հղում՝ Hiddify/Clash subscription header-ներով։
-    1) ստուգում է token-ը (և ban-ը), 2) կարդում է sub ֆայլը GitHub-ից,
-    3) ավելացնում է ինֆո-տողերը, 4) վերադարձնում է Hiddify header-ներով։"""
-    row = db_execute("SELECT user_id, banned FROM users WHERE sub_token = %s", (token,), fetchone=True)
-    if not row:
-        return "Not found", 404
-    if row[1]:
-        return "Subscription disabled", 403
-    try:
-        db_execute(
-            "UPDATE users SET sub_fetches = COALESCE(sub_fetches, 0) + 1, last_sub_at = now() WHERE user_id = %s",
-            (row[0],), commit=True
-        )
-    except Exception:
-        log.exception("sub fetch counter failed")
-
-    # 👑 VIP օգտատերերը նույն հղումով ստանում են VIP սերվերները
-    vip = is_vip(row[0])
-    servers = _sub_extract_body(get_vip_sub() if vip else get_sub())
-    if servers is None:
-        return "Upstream error", 502
-    return _build_sub_response(servers, vip=vip, vip_user_id=row[0])
-
-
-def _build_sub_response(servers, vip=False, vip_user_id=None):
-    """Կառուցում է subscription պատասխանը՝ Hiddify/Happ/INCY header-ներով։
-    Օգտագործվում է և՛ /sub (անվճար), և՛ /sub/<token> (անհատական) հղումների համար։"""
-    title = SUB_PROFILE_TITLE_VIP if vip else SUB_PROFILE_TITLE
-
-    # Մաքրում ենք ֆայլի հին #-մետատողերը (օր.՝ հին #announce, #profile-title),
-    # որ դրանք չհակասեն մեր ուղարկած արժեքներին։
-    server_lines = [l for l in servers.splitlines()
-                    if l.strip() and not l.strip().startswith('#')]
-
-    # Մարմնի սկզբի #-տողերը fallback են այն client-ների համար,
-    # որոնք մետատվյալները կարդում են ֆայլից, ոչ թե header-ներից։
-    body = "\n".join([
-        f"#profile-title: {_b64_header(title)}",
-        f"#profile-update-interval: {SUB_UPDATE_INTERVAL_HOURS}",
-        f"#support-url: {SUB_SUPPORT_URL}",
-        f"#profile-web-page-url: {SUB_CHANNEL_URL}",
-        f"#announce: {_b64_header(SUB_ANNOUNCE)}",
-        "",
-        "\n".join(server_lines),
-        "",
-    ])
-
-    resp = Response(body, mimetype="text/plain")
-    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
-    # Պրոֆիլի անունը (base64՝ էմոջիի համար)
-    resp.headers["Profile-Title"] = _b64_header(title)
-    # Ավտոթարմացման ինտերվալ (ժամ)
-    resp.headers["Profile-Update-Interval"] = str(SUB_UPDATE_INTERVAL_HOURS)
-    # «Support» կ��ճակ պրոֆիլում
-    resp.headers["Support-URL"] = SUB_SUPPORT_URL
-    # «Open web page» կոճակ՝ դեպի ալիք
-    resp.headers["Profile-Web-Page-URL"] = SUB_CHANNEL_URL
-    # Fallback անուն Clash-համատեղելի client-ների համար
-    resp.headers["Content-Disposition"] = 'attachment; filename="vedavpn.txt"'
-    # Announce (Happ). տեքստը երևում է պրոֆիլի անվան հենց տակ
-    resp.headers["Announce"] = _b64_header(SUB_ANNOUNCE)
-
-    # Subscription-Userinfo. Hiddify-ի համար ԲՈԼՈՐ 4 դաշտերը պարտադիր են,
-    # այլապես ամբողջ header-ը դեն է նետվում (և Support/Web կոճակներն էլ չեն երևում)։
-    # total=0 → տրաֆիկը ցույց է տրվում որպես 0В/∞, իսկ expire-ը պահում է «Истекает» ժամկետը։
-    if vip and vip_user_id:
-        until = get_vip_until(vip_user_id) or (datetime.utcnow() + timedelta(days=31))
-    else:
-        until = datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
-    expire_ts = int((until - datetime(1970, 1, 1)).total_seconds())
-    resp.headers["Subscription-Userinfo"] = (
-        f"upload=0; download=0; total=0; expire={expire_ts}"
-    )
-    return resp
-
-
-@app.route('/sub', methods=['GET'])
-def get_sub_public():
-    """Ընդհանուր (անվճար) sub հղումը՝ նույն header-ներով ու announce-ով։"""
-    servers = _sub_extract_body(get_sub())
-    if servers is None:
-        return "Upstream error", 502
-    return _build_sub_response(servers, vip=False)
-
-
-
-# ============================================================
-# AUTOMATIC SERVER HEALTH CHECK
-# Պարբերաբար ստուգում է sub ֆայլի բոլոր սերվերները (TCP connect),
-# և N անընդմեջ ձախողումից հետո ինքնաշխատ ջնջում է GitHub sub ֆայլից։
-# ============================================================
-SERVER_CHECK_INTERVAL = int(os.environ.get('SERVER_CHECK_INTERVAL', 300))   # վայրկյան, default 15 ր.
-MAX_FAILS_BEFORE_REMOVE = int(os.environ.get('MAX_FAILS_BEFORE_REMOVE', 1))  # անընդմեջ ձախողումների քանակ
-SERVER_CHECK_TIMEOUT = int(os.environ.get('SERVER_CHECK_TIMEOUT', 5))       # TCP connect timeout վրկ
-
-_server_fail_counts = {}  # line -> fail count (in-memory, մաքրվում է restart-ի ժամանակ)
-
-
-def extract_host_port(line):
-    """VLESS/VMESS/SS/Trojan/SSR URI-ից քաշում է (host, port)։"""
-    try:
-        line = line.strip()
-        if not line or line.startswith('#'):
-            return None, None
-        if line.startswith('vmess://'):
-            import base64
-            import json
-            raw = line[len('vmess://'):].split('#')[0]
-            padded = raw + '=' * (-len(raw) % 4)
-            data = json.loads(base64.b64decode(padded).decode('utf-8', 'ignore'))
-            host = data.get('add')
-            port = int(data.get('port')) if data.get('port') else None
-            return host, port
-        parsed = urlparse(line)
-        return parsed.hostname, parsed.port
-    except Exception:
-        return None, None
-
-
-def check_server_alive(host, port):
-    """Փորձում է TCP միացում հաստատել host:port-ի հետ։"""
-    if not host or not port:
-        return False
-    try:
-        with socket.create_connection((host, port), timeout=SERVER_CHECK_TIMEOUT):
-            return True
-    except Exception:
-        return False
-
-
-def check_all_servers():
-    """Ստուգում է sub ֆայլի բոլոր տողերը, և ինքնաշխատ ջնջում է
-    այն սերվերները, որոնք MAX_FAILS_BEFORE_REMOVE անընդմեջ ստուգումներում
-    անհասանելի են եղել։"""
-    try:
-        repo, contents = get_sub_file_contents()
-        lines = contents.decoded_content.decode('utf-8').split('\n')
-    except Exception:
-        log.exception("check_all_servers: sub ֆայլը բեռնել չհաջողվեց")
-        return
-
-    to_remove = []
-    still_seen = set()
-
-    for line in lines:
-        if not line.strip() or line.startswith('#'):
-            continue
-        still_seen.add(line)
-        host, port = extract_host_port(line)
-        alive = check_server_alive(host, port)
-        if alive:
-            _server_fail_counts.pop(line, None)
-        else:
-            _server_fail_counts[line] = _server_fail_counts.get(line, 0) + 1
-            if _server_fail_counts[line] >= MAX_FAILS_BEFORE_REMOVE:
-                to_remove.append(line)
-
-    # մաքրում ենք հետքերը այն տողերի համար, որոնք արդեն ֆայլում չկան
-    for key in list(_server_fail_counts.keys()):
-        if key not in still_seen:
-            _server_fail_counts.pop(key, None)
-
-    # 🚨 Circuit breaker. եթե ԲՈԼՈՐ սերվերները միաժամանակ անհասանելի են, դա, ամենայն
-    # հավանականությամբ, ցանցի/պրովայդերի ընդհանուր խնդիր է (կամ health-check thread-ի
-    # իսկ խնդիր), ոչ թե բոլոր սերվերները իրոք մեռած են։ Այս դեպքում ավտոմատ ջնջում/comment
-    # չենք անում, որպեսզի sub ֆայլը պատահաբար ամբողջովին չդատարկվի, այլ միայն ադմինին ենք ահազանգում։
-    if still_seen and len(to_remove) == len(still_seen):
-        try:
-            bot.send_message(
-                ADMIN_ID,
-                "🚨 <b>ТРЕВОГА:</b> Все серверы одновременно недоступны "
-                "(возможно, проблема сети или провайдера).\nАвтоудаление приостановлено, чтобы файл не опустел.",
-                parse_mode="HTML"
-            )
-        except Exception:
-            log.exception("Չհաջողվեց ադմինին ահազանգել բոլոր սերվերների անհասանելիության մասին")
-        return
-
-    if not to_remove:
-        return
-
-    try:
-        # Ամբողջովին ջնջելու փոխարեն՝ comment-ի վերածում ենք (# [AUTO-DISABLED] ...),
-        # որպեսզի սերվերի configuration-ը մնա ֆայլում պատմության/ձ��ռքով վերականգնման
-        # համար, և պատահաբար ամբողջովին բան չկորչի։
-        new_lines = []
-        for l in lines:
-            if l in to_remove:
-                new_lines.append(f"# [AUTO-DISABLED] {l}")
-            else:
-                new_lines.append(l)
-        new_content_str = '\n'.join(new_lines)
-        repo.update_file(
-            contents.path,
-            f"Auto-disabled {len(to_remove)} dead server(s)",
-            new_content_str,
-            contents.sha,
-        )
-        for line in to_remove:
-            _server_fail_counts.pop(line, None)
-            name, protocol = extract_server_name(line)
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"⚠️ Автоматически отключён неработающий сервер: {protocol or 'UNKNOWN'} {name or line[:50]}\n(Строка закомментирована в файле)"
-                )
-            except Exception:
-                log.exception("Չհաջողվեց ադմինին ծանուցել կասեցված սերվերի մասին")
-    except Exception:
-        log.exception("check_all_servers: sub ֆայլը թարմացնել չհաջողվեց")
-
-
-def _server_check_loop():
-    while True:
-        try:
-            check_all_servers()
-        except Exception:
-            log.exception("_server_check_loop crashed")
-        time.sleep(SERVER_CHECK_INTERVAL)
-
-
-def start_server_health_check():
-    """Առանձին daemon թրեդում գործարկում է սերվերների պարբերական ստուգումը։"""
-    threading.Thread(target=_server_check_loop, daemon=True).start()
-    log.info(f"Server health-check started (interval={SERVER_CHECK_INTERVAL}s, max_fails={MAX_FAILS_BEFORE_REMOVE})")
-
-
 def setup_webhook():
     bot.remove_webhook()
     time.sleep(1)
@@ -3500,7 +2976,6 @@ def start_scheduler():
 # directly).
 init_db()
 setup_webhook()
-start_server_health_check()
 start_scheduler()
 # Եթե նախորդ deploy/restart-ի պահին broadcast կիսատ էր մնացել, DB-ի
 # հերթում մնացած տողերը կան դեռ, ուստի այստեղ ինքնաշխատ շարունակում ենք։
