@@ -29,6 +29,5 @@ vless://dde3978f-3179-4611-86f2-eb1eab0007cc@89.125.124.104:1337?flow=xtls-rprx-
 
 
 
-vless://2eacd403-68af-4e92-a57b-0a887a213f3b@189.74.118.2:443?flow=xtls-rprx-vision&type=tcp&security=reality&fp=qq&sni=api.yandex-developer.org&pbk=IuvAXlAWBpeXehmEk0P-FIGTctUhny2H3UilbWWfJC0&sid=122218f4c1f172e4#%F0%9F%87%AA%F0%9F%87%BA%20Europe%20%234%20%7C%20VEDA%20VPN
 
 vless://2eacd403-68af-4e92-a57b-0a887a213f3b@189.74.116.5:443?flow=xtls-rprx-vision&type=tcp&security=reality&fp=qq&sni=api.yandex-dev.com&pbk=IuvAXlAWBpeXehmEk0P-FIGTctUhny2H3UilbWWfJC0&sid=122218f4c1f172e4#%F0%9F%87%AA%F0%9F%87%BA%20Europe%20%238%20%7C%20VEDA%20VPN
