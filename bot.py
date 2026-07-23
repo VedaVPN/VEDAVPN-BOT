@@ -352,7 +352,7 @@ CONTENT_DEFAULTS = {
             "Այս Telegram բոտն ու դրանով տրամադրվող VedaVPN ծառայությունը օգտագործելով՝ դուք համաձայնվում եք հետևյալ պայմաններին։\n\n"
             "<b>1. Ծառայության նկարագրություն</b>\n"
             "VedaVPN-ը անվճար VPN և IPTV հասանելի��ւթյուն է տրամադրում մեր Telegram ալիքի բաժանորդներին՝ որպես bonus։ Ծառայությունը կարող է փոփոխվել, սահմանափակվել կամ ��ադարեցվել ցանկացած պահի, առանց նախնական ծանուցման։\n\n"
-            "<b>2. Օգտվելու պայման</b>\n"
+            "<b>2. Օգտ��ելու պայման</b>\n"
             "VPN հղումը ակտիվ մնալու համար անհրաժեշտ է մնալ բաժանորդագրված մեր ալիքին։ Ալիքից դուրս գալու դեպքում հասանելիությունը կարող է սահմանափակվել։\n\n"
             "<b>3. Թույլատրելի օգտագործում</b>\n"
             "Արգելվում է ծառայությունն օգտագործել ապօրինի գործունեության, երրորդ անձան������ իրավունքների խախտման կամ վնասակար նպատակներով։\n\n"
@@ -793,7 +793,7 @@ def get_member_no(user_id):
 
 
 def send_main_menu(chat_id, lang, message_id=None):
-    """Գ������խավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
+    """Գ������������խավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
     hello = tr(lang, "Ընտրիր բաժինը 👇", "Выбери раздел 👇", "Choose a section 👇")
     no = get_member_no(chat_id)
     no_line = ""
@@ -1049,7 +1049,7 @@ def switch_device(call):
         )
     except Exception:
         pass
-    ok = tr(lang, "✅ Սարքը փոխվեց", "✅ Устройство изменено", "✅ Device changed")
+    ok = tr(lang, "✅ Սա��քը փոխվեց", "✅ Устройство изменено", "✅ Device changed")
     bot.answer_callback_query(call.id, ok)
 
 
@@ -1114,7 +1114,7 @@ def process_captcha(call):
 
     chosen = int(call.data.split('_')[1])
     if chosen != pending['answer']:
-        bot.answer_callback_query(call.id, "❌ Սխալ / Неверно")
+        bot.answer_callback_query(call.id, "❌ Սխալ / ��еверно")
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
@@ -1508,7 +1508,7 @@ def sec_support(chat_id, lang, message_id=None):
               "🛠 Please indicate the issue you are facing so we can resolve it quickly.")
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "����� Can't connect"), callback_data="wizard_connect"),
+        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не п��дключае��ся", "����� Can't connect"), callback_data="wizard_connect"),
         types.InlineKeyboardButton(tr(lang, "🐢 Ցածր արագություն", "🐢 Низкая скорость", "🐢 Low speed"), callback_data="wizard_speed"),
         types.InlineKeyboardButton(tr(lang, "✍️ Այլ հարց (Գրել Ադմինին)", "✍️ Другой вопрос (Админу)", "✍️ Other (Contact Admin)"), callback_data="wizard_admin"),
         types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
@@ -1682,7 +1682,7 @@ def set_birthday(message):
                 f"🎂 Got it: {d:02d}.{m:02d}. Expect a surprise that day 😉"))
             return
     bot.send_message(message.chat.id, tr(lang,
-        "🎂 Գրիր ծննդյանդ օրը այսպես՝ <code>/birthday 25.04</code> (օր.ամիս)",
+        "🎂 Գր��ր ծննդյանդ օրը այսպես՝ <code>/birthday 25.04</code> (օր.ամիս)",
         "🎂 Укажи день рождения так: <code>/birthday 25.04</code> (день.месяц)",
         "🎂 Set your birthday like this: <code>/birthday 25.04</code> (day.month)"), parse_mode="HTML")
 
@@ -1742,7 +1742,7 @@ def sec_rate(chat_id, lang, message_id=None):
 
 
 def sec_reviews(chat_id, lang, message_id=None):
-    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկն��բա��ո��թյունները։"""
+    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում ��ն գնահատականներն ու մեկն��բա��ո��թյունները։"""
     stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
     total = stats[0] if stats and stats[0] else 0
     title = tr(lang, "Կարծիքներ", "Отзывы", "Reviews")
@@ -1783,7 +1783,7 @@ def sec_reviews(chat_id, lang, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
 def rate_callback(call):
-    """Աստղի սեղմում. պա��պան��ւմ ենք գնահատակա��ը և առաջարկում մեկնաբանություն թողնել։"""
+    """Ա��տղի սեղմում. պա��պան��ւմ ենք գնահատակա��ը և առաջարկում մեկնաբանություն թողնել։"""
     lang = get_lang(call.from_user.id)
     try:
         rating = max(1, min(5, int(call.data[5:])))
@@ -1995,7 +1995,7 @@ def feedback_reply(message):
         bot.send_message(fb_uid, notice)
         bot.send_message(ADMIN_ID, "✅ Ответ сохранён и отправлен автору.")
     except Exception:
-        bot.send_message(ADMIN_ID, "✅ Ответ сохранён, но отправить автору не удалось (возможно, автор заблокировал бота).")
+        bot.send_message(ADMIN_ID, "✅ Ответ сохранён, но отправить автору не удалось (возможно, а��т��р заблокировал бота).")
 
 
 # === ADMIN. Feedback stats ===
@@ -2384,7 +2384,7 @@ def list_keys(message):
     bot.send_message(
         ADMIN_ID,
         f"📋 <b>Editable content key-и:</b>\n\n{keys}\n\n"
-        f"Используй: /getcontent key — посмотреть текущее значение\n"
+        f"Используй: /getcontent key — посмотреть текущее ��начение\n"
         f"/setcontent key lang новый_текст — изменить (lang = hy или ru)"
     )
 
@@ -2459,6 +2459,48 @@ def set_link_cmd(message):
         return
     set_config('vpn_link', new_link)
     bot.send_message(ADMIN_ID, f"✅ VPN-ссылка об��овлена:\n<code>{new_link}</code>")
+
+
+@bot.message_handler(commands=['fixsub'])
+def fix_sub_cmd(message):
+    """Ադմին հրաման՝ GitHub-ի sub և sub_vip ֆայլերում մաքրում է հին #-մետատողերը
+    և տեղադրում թարմ profile-title/announce տողերը (raw հղումով օգտվողների համար)։"""
+    if message.chat.id != ADMIN_ID:
+        return
+    def _meta_lines(title):
+        # Փակ ֆայլը header ուղարկել չի կարող, դրա համար ինֆոն դնում ենք
+        # #subscription-userinfo տողով։ total=0 → 0В/∞, expire → «Истекает» ժամկետ։
+        expire_ts = int((datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
+                         - datetime(1970, 1, 1)).total_seconds())
+        return [
+            f"#profile-title: {_b64_header(title)}",
+            f"#profile-update-interval: {SUB_UPDATE_INTERVAL_HOURS}",
+            f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}",
+            f"#support-url: {SUB_SUPPORT_URL}",
+            f"#profile-web-page-url: {SUB_CHANNEL_URL}",
+            f"#announce: {_b64_header(SUB_ANNOUNCE)}",
+            "",
+        ]
+    results = []
+    for label, fetch, title in (
+        ("sub", get_sub_file_contents, SUB_PROFILE_TITLE),
+        ("sub_vip", get_vip_sub_file_contents, SUB_PROFILE_TITLE_VIP),
+    ):
+        try:
+            repo, contents = fetch()
+            old_content = contents.decoded_content.decode('utf-8')
+            server_lines = [l for l in old_content.splitlines()
+                            if l.strip() and not l.strip().startswith('#')]
+            new_content = "\n".join(_meta_lines(title) + server_lines) + "\n"
+            if new_content == old_content:
+                results.append(f"{label}: ✅ уже актуален")
+                continue
+            repo.update_file(contents.path, "Update subscription meta lines", new_content, contents.sha)
+            results.append(f"{label}: ✅ обновлён")
+        except Exception as e:
+            log(f"fixsub {label} error: {e}")
+            results.append(f"{label}: ❌ {e}")
+    bot.send_message(ADMIN_ID, "🔧 <b>GitHub sub файлы:</b>\n\n" + "\n".join(results))
 
 
 @bot.message_handler(commands=['setforum'])
@@ -2808,7 +2850,7 @@ def clear_sub_cmd(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("✅ Да, удалить все", callback_data="confirm_clear_sub"),
-        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear_sub"),
+        types.InlineKeyboardButton("❌ Отм��на", callback_data="cancel_clear_sub"),
     )
     bot.send_message(ADMIN_ID, "⚠️ Вы собираетесь удалить ВСЕ серверы.\nУверены?", reply_markup=markup)
 
@@ -3236,6 +3278,11 @@ def _build_sub_response(servers, vip=False, vip_user_id=None):
     Օգտագործվում է և՛ /sub (անվճար), և՛ /sub/<token> (անհատական) հղումների համար։"""
     title = SUB_PROFILE_TITLE_VIP if vip else SUB_PROFILE_TITLE
 
+    # Մաքրում ենք ֆայլի հին #-մետատողերը (օր.՝ հին #announce, #profile-title),
+    # որ դրանք չհակասեն մեր ուղարկած արժեքներին։
+    server_lines = [l for l in servers.splitlines()
+                    if l.strip() and not l.strip().startswith('#')]
+
     # Մարմնի սկզբի #-տողերը fallback են այն client-ների համար,
     # որոնք մետատվյալները կարդում են ֆայլից, ոչ թե header-ներից։
     body = "\n".join([
@@ -3245,7 +3292,7 @@ def _build_sub_response(servers, vip=False, vip_user_id=None):
         f"#profile-web-page-url: {SUB_CHANNEL_URL}",
         f"#announce: {_b64_header(SUB_ANNOUNCE)}",
         "",
-        servers.strip(),
+        "\n".join(server_lines),
         "",
     ])
 
@@ -3255,7 +3302,7 @@ def _build_sub_response(servers, vip=False, vip_user_id=None):
     resp.headers["Profile-Title"] = _b64_header(title)
     # Ավտոթարմացման ինտերվալ (ժամ)
     resp.headers["Profile-Update-Interval"] = str(SUB_UPDATE_INTERVAL_HOURS)
-    # «Support» կոճակ պրոֆիլում
+    # «Support» կ��ճակ պրոֆիլում
     resp.headers["Support-URL"] = SUB_SUPPORT_URL
     # «Open web page» կոճակ՝ դեպի ալիք
     resp.headers["Profile-Web-Page-URL"] = SUB_CHANNEL_URL
@@ -3266,13 +3313,14 @@ def _build_sub_response(servers, vip=False, vip_user_id=None):
 
     # Subscription-Userinfo. Hiddify-ի համար ԲՈԼՈՐ 4 դաշտերը պարտադիր են,
     # այլապես ամբողջ header-ը դեն է նետվում (և Support/Web կոճակներն էլ չեն երևում)։
+    # total=0 → տրաֆիկը ցույց է տրվում որպես 0В/∞, իսկ expire-ը պահում է «Истекает» ժամկետը։
     if vip and vip_user_id:
         until = get_vip_until(vip_user_id) or (datetime.utcnow() + timedelta(days=31))
     else:
         until = datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
     expire_ts = int((until - datetime(1970, 1, 1)).total_seconds())
     resp.headers["Subscription-Userinfo"] = (
-        f"upload=0; download=0; total={SUB_FAKE_TOTAL}; expire={expire_ts}"
+        f"upload=0; download=0; total=0; expire={expire_ts}"
     )
     return resp
 
