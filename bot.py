@@ -17,6 +17,7 @@ import psycopg2.pool
 import qrcode
 import json
 import requests
+import urllib3
 import uuid
 import telebot
 from telebot import types
@@ -26,6 +27,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("vedavpn")
+# 3X-UI panel-ը հաճախ ինքնաստորագրված TLS ունի՝ անջատում ենք InsecureRequestWarning-ը
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID'))
@@ -84,45 +87,111 @@ class XUIError(Exception):
 
 
 class XUIClient:
-    """Փոքրիկ 3X-UI API client՝ session/cookie-ի ավտոմատ կառավարմամբ։"""
+    """3X-UI (v3.5.0) API client՝ session/cookie-ի ավտոմատ կառավարմամբ,
+    scheme-ի (http/https) ինքնաշտկմամբ և մանրամասն HTTP log-երով։"""
+
+    # 3X-UI-ը հաճախ ինքնաստորագրված TLS է օգտագործում, ուստի cert-ի
+    # ստուգումն անջատում ենք (հակառակ դեպքում կստանանք SSLError)։
+    VERIFY_TLS = False
 
     def __init__(self, base_url, username, password):
+        base_url = (base_url or "").rstrip("/")
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = "https://" + base_url
         self.base_url = base_url
         self.username = username
         self.password = password
         self.session = requests.Session()
+        self.session.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "VedaVPN-Bot/1.0",
+            "X-Requested-With": "XMLHttpRequest",
+        })
         self._lock = threading.Lock()
         self._logged_in = False
+
+    @staticmethod
+    def _swap_scheme(url):
+        if url.startswith("https://"):
+            return "http://" + url[len("https://"):]
+        if url.startswith("http://"):
+            return "https://" + url[len("http://"):]
+        return url
 
     def _url(self, path):
         return f"{self.base_url}/{path.lstrip('/')}"
 
+    def _log_req(self, method, url, kwargs):
+        body = kwargs.get("json", kwargs.get("data"))
+        if isinstance(body, dict) and "password" in body:
+            body = {**body, "password": "***"}
+        log.info("3X-UI → %s %s | headers=%s | body=%s",
+                 method, url, dict(self.session.headers), body)
+
+    def _log_resp(self, r):
+        text = r.text or ""
+        if len(text) > 1500:
+            text = text[:1500] + "…(truncated)"
+        log.info("3X-UI ← status=%s | resp_headers=%s | body=%s",
+                 r.status_code, dict(r.headers), text)
+
+    def _raw(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", 15)
+        kwargs.setdefault("verify", self.VERIFY_TLS)
+        kwargs.setdefault("allow_redirects", False)
+        self._log_req(method, url, kwargs)
+        try:
+            r = self.session.request(method, url, **kwargs)
+        except requests.exceptions.RequestException as e:
+            # HTTP/0.9, SSLError, ProtocolError → սովորաբար սխալ scheme (http vs https)։
+            alt = self._swap_scheme(url)
+            if alt != url:
+                log.warning("3X-UI %s %s failed (%s) → retrying with swapped scheme",
+                            method, url, e)
+                r = self.session.request(method, alt, **kwargs)
+                self.base_url = self._swap_scheme(self.base_url)
+                log.info("3X-UI scheme auto-corrected → base_url=%s", self.base_url)
+                self._log_resp(r)
+                return r
+            raise
+        self._log_resp(r)
+        return r
+
     def login(self):
-        r = self.session.post(
-            self._url("login"),
-            data={"username": self.username, "password": self.password},
-            timeout=10,
-        )
+        # 3X-UI login → POST /login, form-data (ոչ JSON), պատասխանում է session cookie
+        url = self._url("login")
+        r = self._raw("POST", url,
+                      data={"username": self.username, "password": self.password})
         r.raise_for_status()
         try:
-            ok = r.json().get("success", False)
+            ok = bool(r.json().get("success"))
         except Exception:
             ok = False
-        if not ok:
-            raise XUIError("3X-UI login failed (check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL)")
+        has_cookie = len(self.session.cookies) > 0
+        if not (ok and has_cookie):
+            raise XUIError(
+                "3X-UI login failed (success=%s, cookie=%s) — "
+                "check XUI_USERNAME/XUI_PASSWORD/XUI_BASE_URL and http/https scheme"
+                % (ok, has_cookie)
+            )
         self._logged_in = True
+        log.info("3X-UI login OK | base=%s | cookies=%s",
+                 self.base_url, list(self.session.cookies.keys()))
 
     def _request(self, method, path, **kwargs):
         with self._lock:
             if not self._logged_in:
                 self.login()
-        r = self.session.request(method, self._url(path), timeout=15, **kwargs)
-        # Session-ը կարող է լրանալ → նորից login և կրկնում ենք մեկ անգամ
+        r = self._raw(method, self._url(path), **kwargs)
+        # Cookie expired → 3X-UI redirect-ում է login էջ (302/307) կամ HTML։
         ctype = r.headers.get("content-type", "")
-        if r.status_code in (401, 403) or ctype.startswith("text/html"):
+        if r.status_code in (301, 302, 307, 401, 403) or ctype.startswith("text/html"):
+            log.info("3X-UI session expired (status=%s, ctype=%s) → re-login & retry",
+                     r.status_code, ctype)
             with self._lock:
+                self._logged_in = False
                 self.login()
-            r = self.session.request(method, self._url(path), timeout=15, **kwargs)
+            r = self._raw(method, self._url(path), **kwargs)
         r.raise_for_status()
         return r
 
