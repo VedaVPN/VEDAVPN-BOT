@@ -793,7 +793,7 @@ def get_member_no(user_id):
 
 
 def send_main_menu(chat_id, lang, message_id=None):
-    """Գ��խավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
+    """Գ������խավոր մենյու՝ սիրուն «քարտով». հնարավորության դեպքում խմբագրում է նույն հաղորդագրությունը։"""
     hello = tr(lang, "Ընտրիր բաժինը 👇", "Выбери раздел 👇", "Choose a section 👇")
     no = get_member_no(chat_id)
     no_line = ""
@@ -1508,7 +1508,7 @@ def sec_support(chat_id, lang, message_id=None):
               "🛠 Please indicate the issue you are facing so we can resolve it quickly.")
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "���� Can't connect"), callback_data="wizard_connect"),
+        types.InlineKeyboardButton(tr(lang, "🔴 Չի միանում", "🔴 Не подключается", "����� Can't connect"), callback_data="wizard_connect"),
         types.InlineKeyboardButton(tr(lang, "🐢 Ցածր արագություն", "🐢 Низкая скорость", "🐢 Low speed"), callback_data="wizard_speed"),
         types.InlineKeyboardButton(tr(lang, "✍️ Այլ հարց (Գրել Ադմինին)", "✍️ Другой вопрос (Админу)", "✍️ Other (Contact Admin)"), callback_data="wizard_admin"),
         types.InlineKeyboardButton(get_content("btn_main_menu", lang), callback_data="main_menu"),
@@ -1742,7 +1742,7 @@ def sec_rate(chat_id, lang, message_id=None):
 
 
 def sec_reviews(chat_id, lang, message_id=None):
-    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկնաբանո��թյունները։"""
+    """💬 Հրապարակային կարծիքներ. բոլորը տեսնում են գնահատականներն ու մեկն��բա��ո��թյունները։"""
     stats = db_execute("SELECT COUNT(*), AVG(rating) FROM feedback WHERE rating IS NOT NULL", fetchone=True)
     total = stats[0] if stats and stats[0] else 0
     title = tr(lang, "Կարծիքներ", "Отзывы", "Reviews")
@@ -2124,7 +2124,7 @@ def stats_cmd(message):
     ]
     if top:
         lines.append("")
-        lines.append("<b>🏆 Топ приглашающих</b>")
+        lines.append("<b>🏆 Топ приг��ашающих</b>")
         for i, (uid, cnt) in enumerate(top, 1):
             lines.append(f"{i}. <code>{uid}</code> — {cnt}")
 
@@ -2877,7 +2877,7 @@ def is_menu_button(text):
 # === ԱՎՏՈՄԱՏ FAQ ՈՐՈՆՈՒՄ (auto-answer before forwarding to admin) ===
 # Երբ օգտատերը ազատ տեքստով հարց է գրում, բոտը նախ փորձում է գտնել
 # համապատասխան պատրաստի պատասխան՝ ըստ հիմնաբառերի, և միայն դրանից հետո
-# (եթե օգտատերը սեղմի «Դեռ գրել ադմինին») հաղորդագրությունը փոխանցվում է ադմինին։
+# (եթե օգտատերը սեղմի «Դեռ գրել ադմինին») հաղորդագրությունը փոխանցվում է ��դմինին։
 FAQ_SEARCH = [
     {
         'keywords': ['չի աշխատ', 'չաշխատ', 'չի միանում', 'չի բացվում', 'error', 'սխալ',
@@ -3106,7 +3106,6 @@ _SUB_CACHE = {'content': None, 'ts': 0.0}
 _SUB_CACHE_TTL = 60  # seconds
 
 
-@app.route('/sub', methods=['GET'])
 def get_sub():
     # Sub ֆայլը բոտը խմբագրում է GitHub-ում, ուստի կարդում ենք հենց GitHub-ից
     # (կարճ cache-ով), այլ ոչ թե deploy-ի պահի հին լոկալ պատճենից։
@@ -3175,7 +3174,7 @@ SUB_PROFILE_TITLE = "🛡 VedaVPN"
 SUB_PROFILE_TITLE_VIP = "👑 VedaVPN VIP"
 SUB_CHANNEL_URL = "https://t.me/vedavpn"
 SUB_FORUM_URL = "https://t.me/vedavpnforum"
-SUB_SUPPORT_URL = "https://t.me/VedaSupport"
+SUB_SUPPORT_URL = "https://t.me/vedavpn_bot"  # աջակցությունը բոտի մեջ է (🆘 կոճակ)
 SUB_UPDATE_INTERVAL_HOURS = 12       # պրոֆիլի ավտոթարմացում՝ ժամերով
 SUB_FAKE_TOTAL = 1099511627776       # 1 TB «քվոտա»՝ տրաֆիկի գծի համար
 SUB_DEFAULT_DAYS = 365               # ոչ-VIP «ժամկետ»՝ օրերով
@@ -3191,7 +3190,7 @@ def _b64_header(text):
 SUB_ANNOUNCE = (
     "📢 Канал: t.me/vedavpn\n"
     "💬 Форум: t.me/vedavpnforum\n"
-    "🛠 Поддержка: t.me/VedaSupport\n"
+    "🛠 Поддержка: t.me/vedavpn_bot\n"
     "🔄 Если VPN не работает — нажмите кнопку обновления"
 )
 
@@ -3229,7 +3228,12 @@ def get_sub_personal(token):
     servers = _sub_extract_body(get_vip_sub() if vip else get_sub())
     if servers is None:
         return "Upstream error", 502
+    return _build_sub_response(servers, vip=vip, vip_user_id=row[0])
 
+
+def _build_sub_response(servers, vip=False, vip_user_id=None):
+    """Կառուցում է subscription պատասխանը՝ Hiddify/Happ/INCY header-ներով։
+    Օգտագործվում է և՛ /sub (անվճար), և՛ /sub/<token> (անհատական) հղումների համար։"""
     title = SUB_PROFILE_TITLE_VIP if vip else SUB_PROFILE_TITLE
 
     # Մարմնի սկզբի #-տողերը fallback են այն client-ների համար,
@@ -3262,8 +3266,8 @@ def get_sub_personal(token):
 
     # Subscription-Userinfo. Hiddify-ի համար ԲՈԼՈՐ 4 դաշտերը պարտադիր են,
     # այլապես ամբողջ header-ը դեն է նետվում (և Support/Web կոճակներն էլ չեն երևում)։
-    if vip:
-        until = get_vip_until(row[0]) or (datetime.utcnow() + timedelta(days=31))
+    if vip and vip_user_id:
+        until = get_vip_until(vip_user_id) or (datetime.utcnow() + timedelta(days=31))
     else:
         until = datetime.utcnow() + timedelta(days=SUB_DEFAULT_DAYS)
     expire_ts = int((until - datetime(1970, 1, 1)).total_seconds())
@@ -3271,6 +3275,15 @@ def get_sub_personal(token):
         f"upload=0; download=0; total={SUB_FAKE_TOTAL}; expire={expire_ts}"
     )
     return resp
+
+
+@app.route('/sub', methods=['GET'])
+def get_sub_public():
+    """Ընդհանուր (անվճար) sub հղումը՝ նույն header-ներով ու announce-ով։"""
+    servers = _sub_extract_body(get_sub())
+    if servers is None:
+        return "Upstream error", 502
+    return _build_sub_response(servers, vip=False)
 
 
 
@@ -3371,7 +3384,7 @@ def check_all_servers():
 
     try:
         # Ամբողջովին ջնջելու փոխարեն՝ comment-ի վերածում ենք (# [AUTO-DISABLED] ...),
-        # որպեսզի սերվերի configuration-ը մնա ֆայլում պատմության/ձեռքով վերականգնման
+        # որպեսզի սերվերի configuration-ը մնա ֆայլում պատմության/ձ��ռքով վերականգնման
         # համար, և պատահաբար ամբողջովին բան չկորչի։
         new_lines = []
         for l in lines:
